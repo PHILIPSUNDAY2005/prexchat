@@ -16,6 +16,13 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ChitChat NG",
   description: "Every gist, every day.",
+  manifest: "/manifest.json",
+  themeColor: "#0B1120",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "ChitChat NG",
+  },
 };
 
 export default function RootLayout({
