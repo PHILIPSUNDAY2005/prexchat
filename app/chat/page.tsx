@@ -81,10 +81,18 @@ export default function Chat() {
           .limit(1)
           .maybeSingle();
 
+        const { count: unreadCount } = await supabase
+          .from("messages")
+          .select("id", { count: "exact", head: true })
+          .eq("sender_id", contact.id)
+          .eq("receiver_id", myId)
+          .eq("seen", false);
+
         return {
           ...contact,
           lastMessage: lastMsg?.audio_url ? "🎤 Voice note" : lastMsg?.content || "Say hi 👋",
           lastTime: lastMsg?.created_at || null,
+          unreadCount: unreadCount || 0,
         };
       })
     );
@@ -117,6 +125,13 @@ export default function Chat() {
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
 
+    await supabase
+      .from("messages")
+      .update({ seen: true })
+      .eq("sender_id", contact.id)
+      .eq("receiver_id", userId)
+      .eq("seen", false);
+
     if (activeChannelRef.current) {
       supabase.removeChannel(activeChannelRef.current);
     }
@@ -143,6 +158,13 @@ export default function Chat() {
               return [...prev, newMsg];
             });
             loadContacts(userId);
+
+            if (newMsg.sender_id === contact.id) {
+              supabase
+                .from("messages")
+                .update({ seen: true })
+                .eq("id", newMsg.id);
+            }
           }
         }
       )
@@ -179,6 +201,7 @@ export default function Chat() {
     }
     setContactIsTyping(false);
     setActiveContact(null);
+    loadContacts(userId);
   }
 
   function handleTyping(value: string) {
@@ -429,9 +452,16 @@ export default function Chat() {
                 </p>
               </div>
             </div>
-            <span className="text-xs text-zinc-500 flex-shrink-0">
-              {formatTime(contact.lastTime)}
-            </span>
+            <div className="flex flex-col items-end gap-1 flex-shrink-0">
+              <span className="text-xs text-zinc-500">
+                {formatTime(contact.lastTime)}
+              </span>
+              {contact.unreadCount > 0 && (
+                <span className="bg-green-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+                  {contact.unreadCount}
+                </span>
+              )}
+            </div>
           </div>
         ))}
       </div>
