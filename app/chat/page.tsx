@@ -27,6 +27,7 @@ export default function Chat() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const activeChannelRef = useRef<any>(null);
 
   useEffect(() => {
     async function getUser() {
@@ -38,6 +39,12 @@ export default function Chat() {
       }
     }
     getUser();
+
+    return () => {
+      if (activeChannelRef.current) {
+        supabase.removeChannel(activeChannelRef.current);
+      }
+    };
   }, []);
 
   async function handleLogout() {
@@ -96,6 +103,45 @@ export default function Chat() {
       .order("created_at", { ascending: true });
 
     setMessages(data || []);
+
+    if (activeChannelRef.current) {
+      supabase.removeChannel(activeChannelRef.current);
+    }
+
+    const channel = supabase
+      .channel(`chat-${userId}-${contact.id}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          console.log("New message received:", payload);
+          const newMsg = payload.new as any;
+          const isRelevant =
+            (newMsg.sender_id === userId && newMsg.receiver_id === contact.id) ||
+            (newMsg.sender_id === contact.id && newMsg.receiver_id === userId);
+
+          if (isRelevant) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              return [...prev, newMsg];
+            });
+            loadContacts(userId);
+          }
+        }
+      )
+     .subscribe((status) => {
+        console.log("Realtime status:", status);
+      });
+
+    activeChannelRef.current = channel;
+  }
+
+  function closeChat() {
+    if (activeChannelRef.current) {
+      supabase.removeChannel(activeChannelRef.current);
+      activeChannelRef.current = null;
+    }
+    setActiveContact(null);
   }
 
   async function sendMessage() {
@@ -112,7 +158,10 @@ export default function Chat() {
       .single();
 
     if (!error && data) {
-      setMessages([...messages, data]);
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === data.id)) return prev;
+        return [...prev, data];
+      });
       setNewMessage("");
       loadContacts(userId);
     }
@@ -171,7 +220,10 @@ export default function Chat() {
       .single();
 
     if (!error && data) {
-      setMessages((prev) => [...prev, data]);
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === data.id)) return prev;
+        return [...prev, data];
+      });
       loadContacts(userId);
     }
   }
@@ -181,7 +233,7 @@ export default function Chat() {
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
         <div className="bg-zinc-900 p-3 flex items-center gap-3">
           <button
-            onClick={() => setActiveContact(null)}
+            onClick={closeChat}
             className="text-white text-lg px-1"
           >
             ←
