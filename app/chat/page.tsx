@@ -130,7 +130,7 @@ export default function Chat() {
         }
       )
      .subscribe((status) => {
-        console.log("Realtime status:", status);
+        alert("Realtime status: " + status);
       });
 
     activeChannelRef.current = channel;
