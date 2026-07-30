@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PrexChat",
-  description: "Chat with anyone, anywhere.",
+  title: "ChitChat NG",
+  description: "Every gist, every day.",
 };
 
 export default function RootLayout({

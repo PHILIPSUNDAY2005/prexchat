@@ -8,9 +8,9 @@ export default function Home() {
 
       <div className="relative z-10 text-center px-6">
         <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">
-          Prex<span className="text-blue-500">Chat</span>
+          ChitChat<span className="text-blue-500">NG</span>
         </h1>
-        <p className="text-zinc-400 mb-8">Chat with anyone, anywhere.</p>
+        <p className="text-zinc-400 mb-8">Every gist, every day.</p>
 
         <div className="flex flex-col gap-3 w-64 mx-auto">
           <Link

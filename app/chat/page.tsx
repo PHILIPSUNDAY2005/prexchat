@@ -267,7 +267,7 @@ export default function Chat() {
     <div className="min-h-screen bg-zinc-950 text-white pb-16">
       <div className="bg-zinc-900 p-4 flex items-center justify-between">
         <h1 className="text-xl font-bold">
-          Prex<span className="text-blue-500">Chat</span>
+          ChitChat<span className="text-blue-500">NG</span>
         </h1>
         <div className="flex items-center gap-3">
           <span className="text-sm text-zinc-400">Hi, {firstName}</span>

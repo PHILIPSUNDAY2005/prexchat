@@ -36,7 +36,7 @@ export default function Login() {
 
       <div className="relative z-10 bg-zinc-900 p-6 rounded-xl shadow-lg w-80 text-center">
         <h1 className="text-2xl font-bold text-white mb-1">
-          Prex<span className="text-blue-500">Chat</span>
+          ChitChat<span className="text-blue-500">NG</span>
         </h1>
         <p className="text-zinc-400 text-sm mb-4">Log in to your account</p>
 
