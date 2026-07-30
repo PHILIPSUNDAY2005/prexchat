@@ -24,10 +24,14 @@ export default function Chat() {
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
+  const [contactIsTyping, setContactIsTyping] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const activeChannelRef = useRef<any>(null);
+  const pollIntervalRef = useRef<any>(null);
+  const typingTimeoutRef = useRef<any>(null);
+  const lastTypingSentRef = useRef<number>(0);
 
   useEffect(() => {
     async function getUser() {
@@ -43,6 +47,9 @@ export default function Chat() {
     return () => {
       if (activeChannelRef.current) {
         supabase.removeChannel(activeChannelRef.current);
+      }
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
       }
     };
   }, []);
@@ -91,30 +98,40 @@ export default function Chat() {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-  async function openChat(contact: { id: string; first_name: string }) {
-    setActiveContact(contact);
-
+  async function fetchMessages(myId: string, contactId: string) {
     const { data } = await supabase
       .from("messages")
       .select("*")
       .or(
-        `and(sender_id.eq.${userId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${userId})`
+        `and(sender_id.eq.${myId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${myId})`
       )
       .order("created_at", { ascending: true });
 
-    setMessages(data || []);
+    return data || [];
+  }
+
+  async function openChat(contact: { id: string; first_name: string }) {
+    setActiveContact(contact);
+    setContactIsTyping(false);
+
+    const initialMessages = await fetchMessages(userId, contact.id);
+    setMessages(initialMessages);
 
     if (activeChannelRef.current) {
       supabase.removeChannel(activeChannelRef.current);
     }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+
+    const roomName = [userId, contact.id].sort().join("-");
 
     const channel = supabase
-      .channel(`chat-${userId}-${contact.id}`)
+      .channel(`chat-${roomName}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
         (payload) => {
-          console.log("New message received:", payload);
           const newMsg = payload.new as any;
           const isRelevant =
             (newMsg.sender_id === userId && newMsg.receiver_id === contact.id) ||
@@ -129,11 +146,23 @@ export default function Chat() {
           }
         }
       )
-     .subscribe((status) => {
-        alert("Realtime status: " + status);
-      });
+      .on("broadcast", { event: "typing" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          setContactIsTyping(true);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => {
+            setContactIsTyping(false);
+          }, 2500);
+        }
+      })
+      .subscribe();
 
     activeChannelRef.current = channel;
+
+    pollIntervalRef.current = setInterval(async () => {
+      const freshData = await fetchMessages(userId, contact.id);
+      setMessages(freshData);
+    }, 3000);
   }
 
   function closeChat() {
@@ -141,7 +170,31 @@ export default function Chat() {
       supabase.removeChannel(activeChannelRef.current);
       activeChannelRef.current = null;
     }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+    setContactIsTyping(false);
     setActiveContact(null);
+  }
+
+  function handleTyping(value: string) {
+    setNewMessage(value);
+
+    if (!activeChannelRef.current) return;
+
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 1000) {
+      lastTypingSentRef.current = now;
+      activeChannelRef.current.send({
+        type: "broadcast",
+        event: "typing",
+        payload: { senderId: userId },
+      });
+    }
   }
 
   async function sendMessage() {
@@ -243,7 +296,9 @@ export default function Chat() {
           </div>
           <div>
             <p className="font-semibold text-sm">{activeContact.first_name}</p>
-            <p className="text-xs text-zinc-400">last seen recently</p>
+            <p className="text-xs text-zinc-400">
+              {contactIsTyping ? "typing…" : "last seen recently"}
+            </p>
           </div>
         </div>
 
@@ -254,7 +309,7 @@ export default function Chat() {
             backgroundRepeat: "repeat",
           }}
         >
-          {messages.length === 0 && (
+          {messages.length === 0 && !contactIsTyping && (
             <div className="m-auto text-center text-zinc-500 text-sm">
               No messages here yet…
               <br />
@@ -278,13 +333,21 @@ export default function Chat() {
               )}
             </div>
           ))}
+
+          {contactIsTyping && (
+            <div className="bg-zinc-800 self-start rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
+              <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
+              <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
+              <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce" />
+            </div>
+          )}
         </div>
 
         <div className="p-2 bg-zinc-900 flex items-center gap-2">
           <input
             type="text"
             value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
+            onChange={(e) => handleTyping(e.target.value)}
             placeholder="Message"
             className="flex-1 p-3 rounded-full text-sm outline-none bg-zinc-800 text-white"
           />
