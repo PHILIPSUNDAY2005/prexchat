@@ -15,6 +15,8 @@ const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 </svg>
 `)}`;
 
+const commonEmojis = ["😂", "❤️", "👍", "🔥", "😭", "🙏", "😍", "😅", "🎉", "💯", "😩", "👀", "😊", "🤣", "😢", "🙌"];
+
 export default function Chat() {
   const [userId, setUserId] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -25,6 +27,7 @@ export default function Chat() {
   const [newMessage, setNewMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [contactIsTyping, setContactIsTyping] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -147,6 +150,7 @@ export default function Chat() {
   async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
+    setShowEmojiPicker(false);
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
@@ -235,6 +239,7 @@ export default function Chat() {
       clearTimeout(typingTimeoutRef.current);
     }
     setContactIsTyping(false);
+    setShowEmojiPicker(false);
     setActiveContact(null);
     loadContacts(userId);
   }
@@ -471,6 +476,12 @@ export default function Chat() {
           >
             📎
           </label>
+          <button
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className="text-xl w-10 h-10 flex items-center justify-center flex-shrink-0"
+          >
+            😊
+          </button>
           <input
             type="text"
             value={newMessage}
@@ -497,6 +508,23 @@ export default function Chat() {
             </button>
           )}
         </div>
+
+        {showEmojiPicker && (
+          <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2">
+            {commonEmojis.map((emoji, i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  setNewMessage((prev) => prev + emoji);
+                  setShowEmojiPicker(false);
+                }}
+                className="text-2xl hover:scale-125 transition-transform"
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
