@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
+import CallScreen from "../CallScreen";
 
 const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 <svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
@@ -29,6 +30,8 @@ export default function Chat() {
   const [contactIsTyping, setContactIsTyping] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [myWallpaper, setMyWallpaper] = useState("");
+  const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
+  const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -215,6 +218,21 @@ export default function Chat() {
           }, 2500);
         }
       })
+      .on("broadcast", { event: "call-invite" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          setIncomingCall({
+            type: payload.payload.callType,
+            channelName: payload.payload.channelName,
+            callerName: contact.first_name,
+          });
+        }
+      })
+      .on("broadcast", { event: "call-ended" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          setActiveCall(null);
+          setIncomingCall(null);
+        }
+      })
       .subscribe();
 
     activeChannelRef.current = channel;
@@ -269,6 +287,42 @@ export default function Chat() {
         payload: { senderId: userId },
       });
     }
+  }
+
+  function startCall(type: "audio" | "video") {
+    if (!activeContact || !activeChannelRef.current) return;
+
+    const roomName = [userId, activeContact.id].sort().join("-");
+    const channelName = `call-${roomName}`;
+
+    activeChannelRef.current.send({
+      type: "broadcast",
+      event: "call-invite",
+      payload: { senderId: userId, callType: type, channelName },
+    });
+
+    setActiveCall({ type, channelName });
+  }
+
+  function acceptIncomingCall() {
+    if (!incomingCall) return;
+    setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName });
+    setIncomingCall(null);
+  }
+
+  function declineIncomingCall() {
+    setIncomingCall(null);
+  }
+
+  function endCall() {
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: "broadcast",
+        event: "call-ended",
+        payload: { senderId: userId },
+      });
+    }
+    setActiveCall(null);
   }
 
   async function sendMessage() {
@@ -395,9 +449,46 @@ export default function Chat() {
     }
   }
 
+  if (activeCall) {
+    return (
+      <CallScreen
+        channelName={activeCall.channelName}
+        callType={activeCall.type}
+        contactName={activeContact?.first_name || "Contact"}
+        onEnd={endCall}
+      />
+    );
+  }
+
   if (activeContact) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+        {incomingCall && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center">
+            <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center font-bold text-3xl mb-4">
+              {incomingCall.callerName?.charAt(0)}
+            </div>
+            <h2 className="text-xl font-semibold text-white">{incomingCall.callerName}</h2>
+            <p className="text-zinc-400 text-sm mt-1">
+              Incoming {incomingCall.type === "video" ? "video" : "voice"} call…
+            </p>
+            <div className="flex gap-8 mt-8">
+              <button
+                onClick={declineIncomingCall}
+                className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-2xl"
+              >
+                📴
+              </button>
+              <button
+                onClick={acceptIncomingCall}
+                className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center text-2xl"
+              >
+                📞
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="bg-zinc-900 p-3 flex items-center gap-3">
           <button onClick={closeChat} className="text-white text-lg px-1">
             ←
@@ -410,7 +501,7 @@ export default function Chat() {
               <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-zinc-900 rounded-full" />
             )}
           </div>
-          <div>
+          <div className="flex-1">
             <p className="font-semibold text-sm">{activeContact.first_name}</p>
             <p className="text-xs text-zinc-400">
               {contactIsTyping
@@ -420,6 +511,12 @@ export default function Chat() {
                 : "last seen recently"}
             </p>
           </div>
+          <button onClick={() => startCall("audio")} className="text-lg px-2">
+            📞
+          </button>
+          <button onClick={() => startCall("video")} className="text-lg px-2">
+            🎥
+          </button>
         </div>
 
         <div
