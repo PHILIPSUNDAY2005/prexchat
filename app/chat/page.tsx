@@ -89,7 +89,7 @@ export default function Chat() {
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, created_at")
+          .select("content, audio_url, media_url, media_type, created_at")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
@@ -104,9 +104,14 @@ export default function Chat() {
           .eq("receiver_id", myId)
           .eq("seen", false);
 
+        let preview = lastMsg?.content || "Say hi 👋";
+        if (lastMsg?.audio_url) preview = "🎤 Voice note";
+        else if (lastMsg?.media_type === "video") preview = "🎥 Video";
+        else if (lastMsg?.media_type === "image") preview = "📷 Photo";
+
         return {
           ...contact,
-          lastMessage: lastMsg?.audio_url ? "🎤 Voice note" : lastMsg?.content || "Say hi 👋",
+          lastMessage: preview,
           lastTime: lastMsg?.created_at || null,
           unreadCount: unreadCount || 0,
         };
@@ -297,6 +302,46 @@ export default function Chat() {
     setIsRecording(false);
   }
 
+  async function uploadMedia(file: File) {
+    if (!activeContact) return;
+
+    const isVideo = file.type.startsWith("video");
+    const fileExt = file.name.split(".").pop();
+    const fileName = `${userId}-${Date.now()}.${fileExt}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("chat-media")
+      .upload(fileName, file);
+
+    if (uploadError) {
+      alert("Upload failed: " + uploadError.message);
+      return;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from("chat-media")
+      .getPublicUrl(fileName);
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        sender_id: userId,
+        receiver_id: activeContact.id,
+        media_url: urlData.publicUrl,
+        media_type: isVideo ? "video" : "image",
+      })
+      .select()
+      .single();
+
+    if (!error && data) {
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === data.id)) return prev;
+        return [...prev, data];
+      });
+      loadContacts(userId);
+    }
+  }
+
   async function uploadVoiceNote(audioBlob: Blob) {
     if (!activeContact) return;
 
@@ -387,6 +432,12 @@ export default function Chat() {
             >
               {msg.audio_url ? (
                 <audio controls src={msg.audio_url} className="max-w-[220px]" />
+              ) : msg.media_url ? (
+                msg.media_type === "video" ? (
+                  <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                ) : (
+                  <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
+                )
               ) : (
                 msg.content
               )}
@@ -403,6 +454,23 @@ export default function Chat() {
         </div>
 
         <div className="p-2 bg-zinc-900 flex items-center gap-2">
+          <input
+            type="file"
+            accept="image/*,video/*"
+            className="hidden"
+            id="media-input"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) uploadMedia(file);
+              e.target.value = "";
+            }}
+          />
+          <label
+            htmlFor="media-input"
+            className="text-xl cursor-pointer w-10 h-10 flex items-center justify-center flex-shrink-0"
+          >
+            📎
+          </label>
           <input
             type="text"
             value={newMessage}
