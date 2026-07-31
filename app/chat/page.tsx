@@ -28,6 +28,7 @@ export default function Chat() {
   const [isRecording, setIsRecording] = useState(false);
   const [contactIsTyping, setContactIsTyping] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [myWallpaper, setMyWallpaper] = useState("");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -44,6 +45,16 @@ export default function Chat() {
         setUserId(data.user.id);
         setFirstName(data.user.user_metadata.first_name || "");
         loadContacts(data.user.id);
+
+        const { data: myProfile } = await supabase
+          .from("profiles")
+          .select("wallpaper_url")
+          .eq("id", data.user.id)
+          .maybeSingle();
+
+        if (myProfile?.wallpaper_url) {
+          setMyWallpaper(myProfile.wallpaper_url);
+        }
 
         await supabase
           .from("profiles")
@@ -413,10 +424,18 @@ export default function Chat() {
 
         <div
           className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto"
-          style={{
-            backgroundImage: `url("${wallpaperPattern}")`,
-            backgroundRepeat: "repeat",
-          }}
+          style={
+            myWallpaper
+              ? {
+                  backgroundImage: `url("${myWallpaper}")`,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                }
+              : {
+                  backgroundImage: `url("${wallpaperPattern}")`,
+                  backgroundRepeat: "repeat",
+                }
+          }
         >
           {messages.length === 0 && !contactIsTyping && (
             <div className="m-auto text-center text-zinc-500 text-sm">
