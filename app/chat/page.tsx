@@ -20,7 +20,7 @@ export default function Chat() {
   const [firstName, setFirstName] = useState("");
   const [contacts, setContacts] = useState<any[]>([]);
   const [search, setSearch] = useState("");
-  const [activeContact, setActiveContact] = useState<null | { id: string; first_name: string }>(null);
+  const [activeContact, setActiveContact] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -32,6 +32,7 @@ export default function Chat() {
   const pollIntervalRef = useRef<any>(null);
   const typingTimeoutRef = useRef<any>(null);
   const lastTypingSentRef = useRef<number>(0);
+  const heartbeatRef = useRef<any>(null);
 
   useEffect(() => {
     async function getUser() {
@@ -40,6 +41,18 @@ export default function Chat() {
         setUserId(data.user.id);
         setFirstName(data.user.user_metadata.first_name || "");
         loadContacts(data.user.id);
+
+        await supabase
+          .from("profiles")
+          .update({ last_active: new Date().toISOString() })
+          .eq("id", data.user.id);
+
+        heartbeatRef.current = setInterval(async () => {
+          await supabase
+            .from("profiles")
+            .update({ last_active: new Date().toISOString() })
+            .eq("id", data.user.id);
+        }, 30000);
       }
     }
     getUser();
@@ -50,6 +63,9 @@ export default function Chat() {
       }
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
+      }
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
       }
     };
   }, []);
@@ -62,7 +78,7 @@ export default function Chat() {
   async function loadContacts(myId: string) {
     const { data: contactRows } = await supabase
       .from("contacts")
-      .select("contact_id, profiles:contact_id(id, first_name)")
+      .select("contact_id, profiles:contact_id(id, first_name, last_active)")
       .eq("user_id", myId);
 
     if (!contactRows) return;
@@ -106,6 +122,11 @@ export default function Chat() {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
+  function isOnline(lastActive: string | null) {
+    if (!lastActive) return false;
+    return Date.now() - new Date(lastActive).getTime() < 60000;
+  }
+
   async function fetchMessages(myId: string, contactId: string) {
     const { data } = await supabase
       .from("messages")
@@ -118,7 +139,7 @@ export default function Chat() {
     return data || [];
   }
 
-  async function openChat(contact: { id: string; first_name: string }) {
+  async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
 
@@ -160,10 +181,7 @@ export default function Chat() {
             loadContacts(userId);
 
             if (newMsg.sender_id === contact.id) {
-              supabase
-                .from("messages")
-                .update({ seen: true })
-                .eq("id", newMsg.id);
+              supabase.from("messages").update({ seen: true }).eq("id", newMsg.id);
             }
           }
         }
@@ -184,6 +202,18 @@ export default function Chat() {
     pollIntervalRef.current = setInterval(async () => {
       const freshData = await fetchMessages(userId, contact.id);
       setMessages(freshData);
+
+      const { data: freshProfile } = await supabase
+        .from("profiles")
+        .select("last_active")
+        .eq("id", contact.id)
+        .maybeSingle();
+
+      if (freshProfile) {
+        setActiveContact((prev: any) =>
+          prev ? { ...prev, last_active: freshProfile.last_active } : prev
+        );
+      }
     }, 3000);
   }
 
@@ -308,19 +338,25 @@ export default function Chat() {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
         <div className="bg-zinc-900 p-3 flex items-center gap-3">
-          <button
-            onClick={closeChat}
-            className="text-white text-lg px-1"
-          >
+          <button onClick={closeChat} className="text-white text-lg px-1">
             ←
           </button>
-          <div className="w-9 h-9 rounded-full bg-blue-500 flex items-center justify-center font-bold text-sm flex-shrink-0">
-            {activeContact.first_name?.charAt(0)}
+          <div className="relative flex-shrink-0">
+            <div className="w-9 h-9 rounded-full bg-blue-500 flex items-center justify-center font-bold text-sm">
+              {activeContact.first_name?.charAt(0)}
+            </div>
+            {isOnline(activeContact.last_active) && (
+              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-zinc-900 rounded-full" />
+            )}
           </div>
           <div>
             <p className="font-semibold text-sm">{activeContact.first_name}</p>
             <p className="text-xs text-zinc-400">
-              {contactIsTyping ? "typing…" : "last seen recently"}
+              {contactIsTyping
+                ? "typing…"
+                : isOnline(activeContact.last_active)
+                ? "online"
+                : "last seen recently"}
             </p>
           </div>
         </div>
@@ -442,8 +478,13 @@ export default function Chat() {
             className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 hover:bg-zinc-900 cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-full bg-blue-500 flex items-center justify-center font-bold flex-shrink-0">
-                {contact.first_name?.charAt(0)}
+              <div className="relative flex-shrink-0">
+                <div className="w-11 h-11 rounded-full bg-blue-500 flex items-center justify-center font-bold">
+                  {contact.first_name?.charAt(0)}
+                </div>
+                {isOnline(contact.last_active) && (
+                  <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-zinc-950 rounded-full" />
+                )}
               </div>
               <div>
                 <p className="text-sm font-semibold">{contact.first_name}</p>
