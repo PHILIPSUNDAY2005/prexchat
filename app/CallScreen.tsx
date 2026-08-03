@@ -53,7 +53,7 @@ export default function CallScreen({ channelName, callType, contactName, onEnd }
       });
 
       try {
-      const tokenRes = await fetch(`/api/agora-token?channel=${channelName}`);
+        const tokenRes = await fetch(`/api/agora-token?channel=${channelName}`);
         const { token } = await tokenRes.json();
 
         await client.join(appId, channelName, token, 0);

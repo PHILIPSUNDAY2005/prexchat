@@ -40,6 +40,9 @@ export default function Chat() {
   const typingTimeoutRef = useRef<any>(null);
   const lastTypingSentRef = useRef<number>(0);
   const heartbeatRef = useRef<any>(null);
+  const globalChannelRef = useRef<any>(null);
+  const activeContactRef = useRef<any>(null);
+  const contactsRef = useRef<any[]>([]);
 
   useEffect(() => {
     async function getUser() {
@@ -70,6 +73,38 @@ export default function Chat() {
             .update({ last_active: new Date().toISOString() })
             .eq("id", data.user.id);
         }, 30000);
+
+        if ("Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission();
+        }
+
+        const globalChannel = supabase
+          .channel(`global-messages-${data.user.id}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "messages", filter: `receiver_id=eq.${data.user.id}` },
+            (payload) => {
+              const newMsg = payload.new as any;
+              const isViewingThisChat =
+                document.visibilityState === "visible" &&
+                activeContactRef.current?.id === newMsg.sender_id;
+
+              if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
+                const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
+                const senderName = senderContact?.first_name || "New message";
+                const preview = newMsg.audio_url
+                  ? "🎤 Voice note"
+                  : newMsg.media_url
+                  ? "📷 Photo/Video"
+                  : newMsg.content || "New message";
+
+                new Notification(senderName, { body: preview });
+              }
+            }
+          )
+          .subscribe();
+
+        globalChannelRef.current = globalChannel;
       }
     }
     getUser();
@@ -84,8 +119,19 @@ export default function Chat() {
       if (heartbeatRef.current) {
         clearInterval(heartbeatRef.current);
       }
+      if (globalChannelRef.current) {
+        supabase.removeChannel(globalChannelRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    activeContactRef.current = activeContact;
+  }, [activeContact]);
+
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -289,7 +335,7 @@ export default function Chat() {
     }
   }
 
- function buildCallChannelName(idA: string, idB: string) {
+  function buildCallChannelName(idA: string, idB: string) {
     const clean = (id: string) => id.replace(/-/g, "").slice(0, 16);
     const sorted = [idA, idB].sort();
     return `call${clean(sorted[0])}${clean(sorted[1])}`;
@@ -299,6 +345,7 @@ export default function Chat() {
     if (!activeContact || !activeChannelRef.current) return;
 
     const channelName = buildCallChannelName(userId, activeContact.id);
+
     activeChannelRef.current.send({
       type: "broadcast",
       event: "call-invite",

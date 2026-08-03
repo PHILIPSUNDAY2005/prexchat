@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { RtcTokenBuilder, RtcRole } from "agora-access-token";
+import { RtcTokenBuilder, RtcRole } from "agora-token";
 
 export async function GET(request: NextRequest) {
   const channelName = request.nextUrl.searchParams.get("channel");
