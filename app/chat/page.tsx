@@ -289,12 +289,16 @@ export default function Chat() {
     }
   }
 
+ function buildCallChannelName(idA: string, idB: string) {
+    const clean = (id: string) => id.replace(/-/g, "").slice(0, 16);
+    const sorted = [idA, idB].sort();
+    return `call${clean(sorted[0])}${clean(sorted[1])}`;
+  }
+
   function startCall(type: "audio" | "video") {
     if (!activeContact || !activeChannelRef.current) return;
 
-    const roomName = [userId, activeContact.id].sort().join("-");
-    const channelName = `call-${roomName}`;
-
+    const channelName = buildCallChannelName(userId, activeContact.id);
     activeChannelRef.current.send({
       type: "broadcast",
       event: "call-invite",
