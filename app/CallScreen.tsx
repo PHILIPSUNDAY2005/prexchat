@@ -53,7 +53,10 @@ export default function CallScreen({ channelName, callType, contactName, onEnd }
       });
 
       try {
-        await client.join(appId, channelName, null, null);
+      const tokenRes = await fetch(`/api/agora-token?channel=${channelName}`);
+        const { token } = await tokenRes.json();
+
+        await client.join(appId, channelName, token, 0);
 
         const tracks: any[] = [];
         const micTrack = await AgoraRTC.createMicrophoneAudioTrack();
