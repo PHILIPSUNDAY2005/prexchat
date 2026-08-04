@@ -59,6 +59,10 @@ export default function Signup() {
 
     if (error) {
       setMessage(error.message);
+      setCaptchaToken("");
+      if ((window as any).turnstile && captchaRef.current) {
+        (window as any).turnstile.reset(captchaRef.current);
+      }
     } else {
       router.push("/chat");
     }
