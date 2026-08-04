@@ -1,88 +1,125 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import Link from "next/link";
 import { supabase } from "../supabaseClient";
 import ChatBackground from "../ChatBackground";
 
 export default function Signup() {
-  const router = useRouter();
-
-  const [firstName, setFirstName] = useState("");
+  const [fullName, setFullName] = useState("");
   const [username, setUsername] = useState("");
-  const [gender, setGender] = useState("");
-  const [dob, setDob] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [message, setMessage] = useState("");
-  const [captchaToken, setCaptchaToken] = useState("");
-  const captchaRef = useRef<HTMLDivElement>(null);
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [resendMessage, setResendMessage] = useState("");
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if ((window as any).turnstile && captchaRef.current && !captchaRef.current.hasChildNodes()) {
-        (window as any).turnstile.render(captchaRef.current, {
-          sitekey: "0x4AAAAAAEFij6psyC4Aupk3",
-          callback: (token: string) => setCaptchaToken(token),
-        });
-        clearInterval(interval);
-      }
-    }, 300);
-    return () => clearInterval(interval);
-  }, []);
+  function validate() {
+    if (!fullName || !username || !email || !password || !confirmPassword) {
+      return "Please fill in all fields.";
+    }
+    if (password.length < 8) {
+      return "Password must be at least 8 characters.";
+    }
+    if (password !== confirmPassword) {
+      return "Passwords do not match.";
+    }
+    if (!agreed) {
+      return "Please agree to the Terms & Privacy Policy.";
+    }
+    return "";
+  }
 
   async function handleSignup() {
-    if (!firstName || !username || !gender || !dob || !email || !password) {
-      setMessage("Please fill in all fields!");
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
-    if (!captchaToken) {
-      setMessage("Please complete the verification below.");
-      return;
-    }
+    setError("");
+    setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
+    const { error: signUpError } = await supabase.auth.signUp({
       email: email,
       password: password,
       options: {
-        captchaToken: captchaToken,
+        emailRedirectTo: `${window.location.origin}/login`,
         data: {
-          first_name: firstName,
+          first_name: fullName,
           username: username.toLowerCase(),
-          gender: gender,
-          date_of_birth: dob,
         },
       },
     });
 
-    if (error) {
-      setMessage(error.message);
-      setCaptchaToken("");
-      if ((window as any).turnstile && captchaRef.current) {
-        (window as any).turnstile.reset(captchaRef.current);
-      }
+    setLoading(false);
+
+    if (signUpError) {
+      setError(signUpError.message);
     } else {
-      router.push("/chat");
+      setVerificationSent(true);
     }
   }
 
+  async function handleResend() {
+    setResendMessage("Sending…");
+    const { error: resendError } = await supabase.auth.resend({
+      type: "signup",
+      email: email,
+    });
+    setResendMessage(resendError ? resendError.message : "Verification email resent!");
+  }
+
+  if (verificationSent) {
+    return (
+      <div className="relative flex items-center justify-center min-h-screen overflow-hidden bg-[#0B1120] px-6">
+        <ChatBackground />
+        <div className="relative z-10 bg-zinc-900 p-6 rounded-xl shadow-lg w-80 text-center">
+          <h1 className="text-2xl font-bold text-white mb-1">
+            ChitChat<span className="text-blue-500">NG</span>
+          </h1>
+          <p className="text-zinc-300 text-sm mt-4">
+            We've sent a verification email. Please check your inbox to verify your account.
+          </p>
+          <button
+            onClick={handleResend}
+            className="mt-4 text-blue-500 text-sm hover:underline"
+          >
+            Resend Verification Email
+          </button>
+          {resendMessage && (
+            <p className="text-zinc-400 text-xs mt-2">{resendMessage}</p>
+          )}
+          <p className="text-zinc-400 text-xs mt-4">
+            <Link href="/login" className="text-blue-500 font-semibold hover:underline">
+              Back to Log in
+            </Link>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="relative flex items-center justify-center min-h-screen overflow-hidden bg-[#0B1120]">
+    <div className="relative flex items-center justify-center min-h-screen overflow-hidden bg-[#0B1120] px-6 py-10">
       <ChatBackground />
 
-      <div className="relative z-10 bg-zinc-900 p-6 rounded-xl shadow-lg w-80 text-center">
+      <div className="relative z-10 bg-zinc-900 p-6 rounded-xl shadow-lg w-full max-w-sm text-center">
         <h1 className="text-2xl font-bold text-white mb-1">
           ChitChat<span className="text-blue-500">NG</span>
         </h1>
         <p className="text-zinc-400 text-sm mb-4">Create a new account</p>
 
-        <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">First Name</label>
+        <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Full Name</label>
         <input
           type="text"
-          value={firstName}
-          onChange={(e) => setFirstName(e.target.value)}
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
           className="w-full p-2 rounded-lg text-sm outline-none"
         />
 
@@ -95,28 +132,6 @@ export default function Signup() {
           className="w-full p-2 rounded-lg text-sm outline-none"
         />
 
-        <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Gender</label>
-        <select
-          value={gender}
-          onChange={(e) => setGender(e.target.value)}
-          className="w-full p-2 rounded-lg text-sm outline-none"
-        >
-          <option value="">Select Gender</option>
-          <option value="male">Male</option>
-          <option value="female">Female</option>
-          <option value="other">Other</option>
-        </select>
-
-        <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Date of Birth</label>
-        <input
-          type="date"
-          value={dob}
-          onChange={(e) => setDob(e.target.value)}
-          max={new Date().toISOString().split("T")[0]}
-          min="1940-01-01"
-          className="w-full p-2 rounded-lg text-sm outline-none"
-        />
-
         <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Email</label>
         <input
           type="email"
@@ -126,25 +141,65 @@ export default function Signup() {
         />
 
         <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Password</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full p-2 rounded-lg text-sm outline-none"
-        />
+        <div className="relative">
+          <input
+            type={showPassword ? "text" : "password"}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full p-2 rounded-lg text-sm outline-none pr-10"
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-zinc-500"
+          >
+            {showPassword ? "Hide" : "Show"}
+          </button>
+        </div>
 
-        <div ref={captchaRef} className="mt-4 flex justify-center" />
+        <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Confirm Password</label>
+        <div className="relative">
+          <input
+            type={showConfirmPassword ? "text" : "password"}
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            className="w-full p-2 rounded-lg text-sm outline-none pr-10"
+          />
+          <button
+            type="button"
+            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-zinc-500"
+          >
+            {showConfirmPassword ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        <label className="flex items-start gap-2 mt-4 text-left">
+          <input
+            type="checkbox"
+            checked={agreed}
+            onChange={(e) => setAgreed(e.target.checked)}
+            className="mt-1"
+          />
+          <span className="text-xs text-zinc-400">
+            I agree to the Terms & Privacy Policy
+          </span>
+        </label>
+
+        {error && (
+          <p className="text-red-400 text-xs mt-3">{error}</p>
+        )}
 
         <button
           onClick={handleSignup}
-          className="w-full bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-lg text-sm mt-3"
+          disabled={loading}
+          className="w-full bg-blue-500 hover:bg-blue-600 disabled:opacity-60 text-white p-2 rounded-lg text-sm mt-4 flex items-center justify-center gap-2"
         >
-          Sign Up
+          {loading && (
+            <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          )}
+          {loading ? "Creating account…" : "Sign Up"}
         </button>
-
-        {message && (
-          <p className="text-zinc-300 text-xs mt-3">{message}</p>
-        )}
 
         <p className="text-zinc-400 text-xs mt-4">
           Already have an account?{" "}
