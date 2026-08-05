@@ -593,28 +593,53 @@ export default function Chat() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
-                msg.sender_id === userId
-                  ? "bg-blue-500 self-end rounded-br-sm"
-                  : "bg-zinc-800 self-start rounded-bl-sm"
-              }`}
-            >
-              {msg.audio_url ? (
-                <audio controls src={msg.audio_url} className="max-w-[220px]" />
-              ) : msg.media_url ? (
-                msg.media_type === "video" ? (
-                  <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
-                ) : (
-                  <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
-                )
-              ) : (
-                msg.content
-              )}
-            </div>
-          ))}
+       {messages.map((msg) => (
+  <div
+    key={msg.id}
+    className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
+      msg.sender_id === userId
+        ? "bg-blue-500 self-end rounded-br-sm"
+        : "bg-zinc-800 self-start rounded-bl-sm"
+    }`}
+  >
+    {msg.audio_url ? (
+      <audio controls src={msg.audio_url} className="max-w-[220px]" />
+    ) : msg.media_url ? (
+      msg.media_type === "video" ? (
+        <video
+          controls
+          src={msg.media_url}
+          className="max-w-[220px] rounded-lg"
+        />
+      ) : (
+        <img
+          src={msg.media_url}
+          alt="Shared photo"
+          className="max-w-[220px] rounded-lg"
+        />
+      )
+    ) : (
+      <p>{msg.content}</p>
+    )}
+
+    <div className="flex justify-end items-center gap-1 mt-1 text-[10px] text-zinc-300">
+      <span>
+        {new Date(msg.created_at).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}
+      </span>
+
+      {msg.sender_id === userId && (
+        msg.seen ? (
+          <span className="text-blue-300">✓✓</span>
+        ) : (
+          <span>✓</span>
+        )
+      )}
+    </div>
+  </div>
+))}
 
           {contactIsTyping && (
             <div className="bg-zinc-800 self-start rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
