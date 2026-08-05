@@ -1,5 +1,5 @@
 "use client";
-
+import { enableNotifications } from "../pushNotifications";
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
@@ -651,6 +651,12 @@ export default function Chat() {
         </div>
 
         <div className="p-2 bg-zinc-900 flex items-center gap-2">
+          <button
+  onClick={() => enableNotifications(userId)}
+  className="bg-blue-500 text-white px-4 py-2 rounded-lg mb-2"
+>
+  Enable Notifications 🔔
+</button>
           <input
             type="file"
             accept="image/*,video/*"
