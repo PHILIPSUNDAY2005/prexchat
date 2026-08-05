@@ -35,19 +35,20 @@ export default function Signup() {
     return "";
   }
 
-  async function handleSignup() {
-    const validationError = validate();
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
+async function handleSignup() {
+  const validationError = validate();
+  if (validationError) {
+    setError(validationError);
+    return;
+  }
 
-    setError("");
-    setLoading(true);
+  setError("");
+  setLoading(true);
 
-    const { error: signUpError } = await supabase.auth.signUp({
-      email: email,
-      password: password,
+  try {
+    const { data, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
       options: {
         emailRedirectTo: `${window.location.origin}/login`,
         data: {
@@ -56,6 +57,36 @@ export default function Signup() {
         },
       },
     });
+
+    console.log("Signup Data:", data);
+    console.log("Signup Error:", signUpError);
+
+    setLoading(false);
+
+    if (signUpError) {
+      console.error("Signup Error:", signUpError);
+      setError(
+        JSON.stringify(
+          {
+            message: signUpError.message,
+            status: signUpError.status,
+            code: signUpError.code,
+            name: signUpError.name,
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    setVerificationSent(true);
+  } catch (err) {
+    console.error("Unexpected Error:", err);
+    setLoading(false);
+    setError(err instanceof Error ? err.message : JSON.stringify(err));
+  }
+}
 
     setLoading(false);
 
