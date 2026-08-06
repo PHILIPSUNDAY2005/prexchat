@@ -65,21 +65,21 @@ export default function CreateGroup() {
       return;
     }
 
-    const { data: group, error: groupError } = await supabase
-      .from("groups")
-      .insert({ name: groupName.trim(), created_by: user.id })
-      .select()
-      .single();
+    const newGroupId = crypto.randomUUID();
 
-    if (groupError || !group) {
-      setError(groupError?.message || "Failed to create group.");
+    const { error: groupError } = await supabase
+      .from("groups")
+      .insert({ id: newGroupId, name: groupName.trim(), created_by: user.id });
+
+    if (groupError) {
+      setError(groupError.message);
       setLoading(false);
       return;
     }
 
     const members = [
-      { group_id: group.id, user_id: user.id, role: "admin" },
-      ...selected.map((id) => ({ group_id: group.id, user_id: id, role: "member" })),
+      { group_id: newGroupId, user_id: user.id, role: "admin" },
+      ...selected.map((id) => ({ group_id: newGroupId, user_id: id, role: "member" })),
     ];
 
     const { error: memberError } = await supabase
@@ -93,7 +93,7 @@ export default function CreateGroup() {
       return;
     }
 
-    router.push(`/groupchat/${group.id}`);
+    router.push(`/groupchat/${newGroupId}`);
   }
 
   return (
