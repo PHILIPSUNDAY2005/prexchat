@@ -753,7 +753,10 @@ export default function Chat() {
         <h1 className="text-xl font-bold">
           ChitChat<span className="text-blue-500">NG</span>
         </h1>
-        <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3">
+          <Link href="/creategroup" className="text-lg" title="New Group">
+            ➕
+          </Link>
           <span className="text-sm text-zinc-400">Hi, {firstName}</span>
           <button
             onClick={handleLogout}
