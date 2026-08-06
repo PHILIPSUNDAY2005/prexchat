@@ -4,6 +4,54 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
 
+function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  function formatDuration(seconds: number) {
+    if (!seconds || isNaN(seconds)) return "0:00";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function togglePlay() {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 min-w-[160px]">
+      <audio
+        ref={audioRef}
+        src={src}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <button
+        onClick={togglePlay}
+        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+          isMine ? "bg-white/20" : "bg-blue-500"
+        }`}
+      >
+        {isPlaying ? "⏸" : "▶"}
+      </button>
+      <span className="text-xs opacity-80">
+        {formatDuration(isPlaying || currentTime > 0 ? currentTime : duration)}
+      </span>
+    </div>
+  );
+}
+
 const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 <svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
   <g fill='none' stroke='#ffffff' stroke-opacity='0.05' stroke-width='2'>
@@ -445,7 +493,7 @@ export default function Chat() {
               }`}
             >
               {msg.audio_url ? (
-                <audio controls src={msg.audio_url} className="max-w-[220px]" />
+                <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
               ) : msg.media_url ? (
                 msg.media_type === "video" ? (
                   <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
