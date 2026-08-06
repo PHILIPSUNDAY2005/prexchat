@@ -140,7 +140,7 @@ export default function Chat() {
   async function loadContacts(myId: string) {
     const { data: contactRows } = await supabase
       .from("contacts")
-      .select("contact_id, profiles:contact_id(id, first_name, last_active)")
+      .select("contact_id, profiles:contact_id(id, first_name, last_active, avatar_url)")
       .eq("user_id", myId);
 
     if (!contactRows) return;
@@ -444,27 +444,38 @@ export default function Chat() {
   if (activeContact) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
-        <div className="bg-zinc-900 p-3 flex items-center gap-3">
-          <button onClick={closeChat} className="text-white text-lg px-1">
-            ←
-          </button>
-          <div className="relative flex-shrink-0">
-            <div className="w-9 h-9 rounded-full bg-blue-500 flex items-center justify-center font-bold text-sm">
-              {activeContact.first_name?.charAt(0)}
+       <div className="bg-zinc-900 p-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button onClick={closeChat} className="text-white text-lg px-1">
+              ←
+            </button>
+            <div className="relative flex-shrink-0">
+              <div className="w-9 h-9 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold text-sm">
+                {activeContact.avatar_url ? (
+                  <img src={activeContact.avatar_url} className="w-full h-full object-cover" />
+                ) : (
+                  activeContact.first_name?.charAt(0)
+                )}
+              </div>
+              {isOnline(activeContact.last_active) && (
+                <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-zinc-900 rounded-full" />
+              )}
             </div>
-            {isOnline(activeContact.last_active) && (
-              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-zinc-900 rounded-full" />
-            )}
+            <div>
+              <p className="font-semibold text-sm">{activeContact.first_name}</p>
+              <p className="text-xs text-zinc-400">
+                {contactIsTyping
+                  ? "typing…"
+                  : isOnline(activeContact.last_active)
+                  ? "online"
+                  : "last seen recently"}
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="font-semibold text-sm">{activeContact.first_name}</p>
-            <p className="text-xs text-zinc-400">
-              {contactIsTyping
-                ? "typing…"
-                : isOnline(activeContact.last_active)
-                ? "online"
-                : "last seen recently"}
-            </p>
+          <div className="flex items-center gap-4 text-lg pr-1">
+            <button title="Video call">🎥</button>
+            <button title="Voice call">📞</button>
+            <button title="More">⋮</button>
           </div>
         </div>
 
@@ -493,7 +504,73 @@ export default function Chat() {
               }`}
             >
               {msg.audio_url ? (
-                <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
+             function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  const bars = [6, 12, 18, 10, 14, 20, 9, 16, 22, 8, 13, 19, 7, 15, 21, 11, 17, 9, 14, 6];
+
+  function formatDuration(seconds: number) {
+    if (!seconds || isNaN(seconds)) return "0:00";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function togglePlay() {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
+    }
+  }
+
+  const progress = duration ? currentTime / duration : 0;
+  const playedBars = Math.round(progress * bars.length);
+
+  return (
+    <div className="flex items-center gap-2 min-w-[190px]">
+      <audio
+        ref={audioRef}
+        src={src}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <button
+        onClick={togglePlay}
+        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+          isMine ? "bg-white/20" : "bg-blue-500"
+        }`}
+      >
+        {isPlaying ? "⏸" : "▶"}
+      </button>
+      <div className="flex items-end gap-[2px] h-5">
+        {bars.map((h, i) => (
+          <div
+            key={i}
+            className={`w-[3px] rounded-full ${
+              i < playedBars
+                ? "bg-white"
+                : isMine
+                ? "bg-white/40"
+                : "bg-zinc-500"
+            }`}
+            style={{ height: `${h}px` }}
+          />
+        ))}
+      </div>
+      <span className="text-[10px] opacity-80 flex-shrink-0">
+        {formatDuration(isPlaying || currentTime > 0 ? currentTime : duration)}
+      </span>
+    </div>
+  );
+}
               ) : msg.media_url ? (
                 msg.media_type === "video" ? (
                   <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
