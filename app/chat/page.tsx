@@ -377,28 +377,44 @@ export default function Chat() {
   }
 
   async function sendMessage() {
-    if (!newMessage || !activeContact) return;
+  if (!newMessage || !activeContact) return;
 
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        sender_id: userId,
-        receiver_id: activeContact.id,
-        content: newMessage,
-      })
-      .select()
-      .single();
+  const messageText = newMessage;
 
-    if (!error && data) {
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === data.id)) return prev;
-        return [...prev, data];
-      });
-      setNewMessage("");
-      loadContacts(userId);
-    }
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      sender_id: userId,
+      receiver_id: activeContact.id,
+      content: messageText,
+    })
+    .select()
+    .single();
+
+  if (!error && data) {
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === data.id)) return prev;
+      return [...prev, data];
+    });
+
+    setNewMessage("");
+    loadContacts(userId);
+
+    // Send push notification
+    await fetch("/api/send-notification", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        receiverId: activeContact.id,
+        title: "New message",
+        body: messageText,
+        url: "/chat",
+      }),
+    });
   }
-
+}
   async function startRecording() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const recorder = new MediaRecorder(stream);
