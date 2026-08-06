@@ -1,9 +1,8 @@
 "use client";
-import { enableNotifications } from "../pushNotifications";
+
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
-import CallScreen from "../CallScreen";
 
 const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 <svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
@@ -16,22 +15,17 @@ const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 </svg>
 `)}`;
 
-const commonEmojis = ["😂", "❤️", "👍", "🔥", "😭", "🙏", "😍", "😅", "🎉", "💯", "😩", "👀", "😊", "🤣", "😢", "🙌"];
-
 export default function Chat() {
   const [userId, setUserId] = useState("");
   const [firstName, setFirstName] = useState("");
   const [contacts, setContacts] = useState<any[]>([]);
+  const [groups, setGroups] = useState<any[]>([]);
   const [search, setSearch] = useState("");
   const [activeContact, setActiveContact] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [contactIsTyping, setContactIsTyping] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [myWallpaper, setMyWallpaper] = useState("");
-  const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
-  const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -40,9 +34,6 @@ export default function Chat() {
   const typingTimeoutRef = useRef<any>(null);
   const lastTypingSentRef = useRef<number>(0);
   const heartbeatRef = useRef<any>(null);
-  const globalChannelRef = useRef<any>(null);
-  const activeContactRef = useRef<any>(null);
-  const contactsRef = useRef<any[]>([]);
 
   useEffect(() => {
     async function getUser() {
@@ -51,16 +42,7 @@ export default function Chat() {
         setUserId(data.user.id);
         setFirstName(data.user.user_metadata.first_name || "");
         loadContacts(data.user.id);
-
-        const { data: myProfile } = await supabase
-          .from("profiles")
-          .select("wallpaper_url")
-          .eq("id", data.user.id)
-          .maybeSingle();
-
-        if (myProfile?.wallpaper_url) {
-          setMyWallpaper(myProfile.wallpaper_url);
-        }
+        loadGroups(data.user.id);
 
         await supabase
           .from("profiles")
@@ -73,38 +55,6 @@ export default function Chat() {
             .update({ last_active: new Date().toISOString() })
             .eq("id", data.user.id);
         }, 30000);
-
-        if ("Notification" in window && Notification.permission === "default") {
-          Notification.requestPermission();
-        }
-
-        const globalChannel = supabase
-          .channel(`global-messages-${data.user.id}`)
-          .on(
-            "postgres_changes",
-            { event: "INSERT", schema: "public", table: "messages", filter: `receiver_id=eq.${data.user.id}` },
-            (payload) => {
-              const newMsg = payload.new as any;
-              const isViewingThisChat =
-                document.visibilityState === "visible" &&
-                activeContactRef.current?.id === newMsg.sender_id;
-
-              if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
-                const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
-                const senderName = senderContact?.first_name || "New message";
-                const preview = newMsg.audio_url
-                  ? "🎤 Voice note"
-                  : newMsg.media_url
-                  ? "📷 Photo/Video"
-                  : newMsg.content || "New message";
-
-                new Notification(senderName, { body: preview });
-              }
-            }
-          )
-          .subscribe();
-
-        globalChannelRef.current = globalChannel;
       }
     }
     getUser();
@@ -119,19 +69,20 @@ export default function Chat() {
       if (heartbeatRef.current) {
         clearInterval(heartbeatRef.current);
       }
-      if (globalChannelRef.current) {
-        supabase.removeChannel(globalChannelRef.current);
-      }
     };
   }, []);
 
-  useEffect(() => {
-    activeContactRef.current = activeContact;
-  }, [activeContact]);
+  async function loadGroups(myId: string) {
+    const { data } = await supabase
+      .from("group_members")
+      .select("group_id, groups:group_id(id, name)")
+      .eq("user_id", myId);
 
-  useEffect(() => {
-    contactsRef.current = contacts;
-  }, [contacts]);
+    if (data) {
+      const list = data.map((row: any) => row.groups).filter(Boolean);
+      setGroups(list);
+    }
+  }
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -210,7 +161,6 @@ export default function Chat() {
   async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
-    setShowEmojiPicker(false);
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
@@ -264,21 +214,6 @@ export default function Chat() {
           }, 2500);
         }
       })
-      .on("broadcast", { event: "call-invite" }, (payload) => {
-        if (payload.payload.senderId === contact.id) {
-          setIncomingCall({
-            type: payload.payload.callType,
-            channelName: payload.payload.channelName,
-            callerName: contact.first_name,
-          });
-        }
-      })
-      .on("broadcast", { event: "call-ended" }, (payload) => {
-        if (payload.payload.senderId === contact.id) {
-          setActiveCall(null);
-          setIncomingCall(null);
-        }
-      })
       .subscribe();
 
     activeChannelRef.current = channel;
@@ -314,7 +249,6 @@ export default function Chat() {
       clearTimeout(typingTimeoutRef.current);
     }
     setContactIsTyping(false);
-    setShowEmojiPicker(false);
     setActiveContact(null);
     loadContacts(userId);
   }
@@ -335,86 +269,29 @@ export default function Chat() {
     }
   }
 
-  function buildCallChannelName(idA: string, idB: string) {
-    const clean = (id: string) => id.replace(/-/g, "").slice(0, 16);
-    const sorted = [idA, idB].sort();
-    return `call${clean(sorted[0])}${clean(sorted[1])}`;
-  }
-
-  function startCall(type: "audio" | "video") {
-    if (!activeContact || !activeChannelRef.current) return;
-
-    const channelName = buildCallChannelName(userId, activeContact.id);
-
-    activeChannelRef.current.send({
-      type: "broadcast",
-      event: "call-invite",
-      payload: { senderId: userId, callType: type, channelName },
-    });
-
-    setActiveCall({ type, channelName });
-  }
-
-  function acceptIncomingCall() {
-    if (!incomingCall) return;
-    setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName });
-    setIncomingCall(null);
-  }
-
-  function declineIncomingCall() {
-    setIncomingCall(null);
-  }
-
-  function endCall() {
-    if (activeChannelRef.current) {
-      activeChannelRef.current.send({
-        type: "broadcast",
-        event: "call-ended",
-        payload: { senderId: userId },
-      });
-    }
-    setActiveCall(null);
-  }
-
   async function sendMessage() {
-  if (!newMessage || !activeContact) return;
+    if (!newMessage || !activeContact) return;
 
-  const messageText = newMessage;
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        sender_id: userId,
+        receiver_id: activeContact.id,
+        content: newMessage,
+      })
+      .select()
+      .single();
 
-  const { data, error } = await supabase
-    .from("messages")
-    .insert({
-      sender_id: userId,
-      receiver_id: activeContact.id,
-      content: messageText,
-    })
-    .select()
-    .single();
-
-  if (!error && data) {
-    setMessages((prev) => {
-      if (prev.some((m) => m.id === data.id)) return prev;
-      return [...prev, data];
-    });
-
-    setNewMessage("");
-    loadContacts(userId);
-
-    // Send push notification
-    await fetch("/api/send-notification", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        receiverId: activeContact.id,
-        title: "New message",
-        body: messageText,
-        url: "/chat",
-      }),
-    });
+    if (!error && data) {
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === data.id)) return prev;
+        return [...prev, data];
+      });
+      setNewMessage("");
+      loadContacts(userId);
+    }
   }
-}
+
   async function startRecording() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const recorder = new MediaRecorder(stream);
@@ -437,6 +314,43 @@ export default function Chat() {
   function stopRecording() {
     mediaRecorderRef.current?.stop();
     setIsRecording(false);
+  }
+
+  async function uploadVoiceNote(audioBlob: Blob) {
+    if (!activeContact) return;
+
+    const fileName = `${userId}-${Date.now()}.webm`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("voice-notes")
+      .upload(fileName, audioBlob);
+
+    if (uploadError) {
+      alert("Upload failed: " + uploadError.message);
+      return;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from("voice-notes")
+      .getPublicUrl(fileName);
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        sender_id: userId,
+        receiver_id: activeContact.id,
+        audio_url: urlData.publicUrl,
+      })
+      .select()
+      .single();
+
+    if (!error && data) {
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === data.id)) return prev;
+        return [...prev, data];
+      });
+      loadContacts(userId);
+    }
   }
 
   async function uploadMedia(file: File) {
@@ -479,83 +393,9 @@ export default function Chat() {
     }
   }
 
-  async function uploadVoiceNote(audioBlob: Blob) {
-    if (!activeContact) return;
-
-    const fileName = `${userId}-${Date.now()}.webm`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("voice-notes")
-      .upload(fileName, audioBlob);
-
-    if (uploadError) {
-      alert("Upload failed: " + uploadError.message);
-      return;
-    }
-
-    const { data: urlData } = supabase.storage
-      .from("voice-notes")
-      .getPublicUrl(fileName);
-
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        sender_id: userId,
-        receiver_id: activeContact.id,
-        audio_url: urlData.publicUrl,
-      })
-      .select()
-      .single();
-
-    if (!error && data) {
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === data.id)) return prev;
-        return [...prev, data];
-      });
-      loadContacts(userId);
-    }
-  }
-
-  if (activeCall) {
-    return (
-      <CallScreen
-        channelName={activeCall.channelName}
-        callType={activeCall.type}
-        contactName={activeContact?.first_name || "Contact"}
-        onEnd={endCall}
-      />
-    );
-  }
-
   if (activeContact) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
-        {incomingCall && (
-          <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center">
-            <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center font-bold text-3xl mb-4">
-              {incomingCall.callerName?.charAt(0)}
-            </div>
-            <h2 className="text-xl font-semibold text-white">{incomingCall.callerName}</h2>
-            <p className="text-zinc-400 text-sm mt-1">
-              Incoming {incomingCall.type === "video" ? "video" : "voice"} call…
-            </p>
-            <div className="flex gap-8 mt-8">
-              <button
-                onClick={declineIncomingCall}
-                className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-2xl"
-              >
-                📴
-              </button>
-              <button
-                onClick={acceptIncomingCall}
-                className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center text-2xl"
-              >
-                📞
-              </button>
-            </div>
-          </div>
-        )}
-
         <div className="bg-zinc-900 p-3 flex items-center gap-3">
           <button onClick={closeChat} className="text-white text-lg px-1">
             ←
@@ -568,7 +408,7 @@ export default function Chat() {
               <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-zinc-900 rounded-full" />
             )}
           </div>
-          <div className="flex-1">
+          <div>
             <p className="font-semibold text-sm">{activeContact.first_name}</p>
             <p className="text-xs text-zinc-400">
               {contactIsTyping
@@ -578,28 +418,14 @@ export default function Chat() {
                 : "last seen recently"}
             </p>
           </div>
-          <button onClick={() => startCall("audio")} className="text-lg px-2">
-            📞
-          </button>
-          <button onClick={() => startCall("video")} className="text-lg px-2">
-            🎥
-          </button>
         </div>
 
         <div
           className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto"
-          style={
-            myWallpaper
-              ? {
-                  backgroundImage: `url("${myWallpaper}")`,
-                  backgroundSize: "cover",
-                  backgroundPosition: "center",
-                }
-              : {
-                  backgroundImage: `url("${wallpaperPattern}")`,
-                  backgroundRepeat: "repeat",
-                }
-          }
+          style={{
+            backgroundImage: `url("${wallpaperPattern}")`,
+            backgroundRepeat: "repeat",
+          }}
         >
           {messages.length === 0 && !contactIsTyping && (
             <div className="m-auto text-center text-zinc-500 text-sm">
@@ -609,53 +435,28 @@ export default function Chat() {
             </div>
           )}
 
-       {messages.map((msg) => (
-  <div
-    key={msg.id}
-    className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
-      msg.sender_id === userId
-        ? "bg-blue-500 self-end rounded-br-sm"
-        : "bg-zinc-800 self-start rounded-bl-sm"
-    }`}
-  >
-    {msg.audio_url ? (
-      <audio controls src={msg.audio_url} className="max-w-[220px]" />
-    ) : msg.media_url ? (
-      msg.media_type === "video" ? (
-        <video
-          controls
-          src={msg.media_url}
-          className="max-w-[220px] rounded-lg"
-        />
-      ) : (
-        <img
-          src={msg.media_url}
-          alt="Shared photo"
-          className="max-w-[220px] rounded-lg"
-        />
-      )
-    ) : (
-      <p>{msg.content}</p>
-    )}
-
-    <div className="flex justify-end items-center gap-1 mt-1 text-[10px] text-zinc-300">
-      <span>
-        {new Date(msg.created_at).toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}
-      </span>
-
-      {msg.sender_id === userId && (
-        msg.seen ? (
-          <span className="text-blue-300">✓✓</span>
-        ) : (
-          <span>✓</span>
-        )
-      )}
-    </div>
-  </div>
-))}
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
+                msg.sender_id === userId
+                  ? "bg-blue-500 self-end rounded-br-sm"
+                  : "bg-zinc-800 self-start rounded-bl-sm"
+              }`}
+            >
+              {msg.audio_url ? (
+                <audio controls src={msg.audio_url} className="max-w-[220px]" />
+              ) : msg.media_url ? (
+                msg.media_type === "video" ? (
+                  <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                ) : (
+                  <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
+                )
+              ) : (
+                msg.content
+              )}
+            </div>
+          ))}
 
           {contactIsTyping && (
             <div className="bg-zinc-800 self-start rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
@@ -667,12 +468,6 @@ export default function Chat() {
         </div>
 
         <div className="p-2 bg-zinc-900 flex items-center gap-2">
-          <button
-  onClick={() => enableNotifications(userId)}
-  className="bg-blue-500 text-white px-4 py-2 rounded-lg mb-2"
->
-  Enable Notifications 🔔
-</button>
           <input
             type="file"
             accept="image/*,video/*"
@@ -690,12 +485,6 @@ export default function Chat() {
           >
             📎
           </label>
-          <button
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="text-xl w-10 h-10 flex items-center justify-center flex-shrink-0"
-          >
-            😊
-          </button>
           <input
             type="text"
             value={newMessage}
@@ -722,23 +511,6 @@ export default function Chat() {
             </button>
           )}
         </div>
-
-        {showEmojiPicker && (
-          <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2">
-            {commonEmojis.map((emoji, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  setNewMessage((prev) => prev + emoji);
-                  setShowEmojiPicker(false);
-                }}
-                className="text-2xl hover:scale-125 transition-transform"
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
     );
   }
@@ -753,7 +525,7 @@ export default function Chat() {
         <h1 className="text-xl font-bold">
           ChitChat<span className="text-blue-500">NG</span>
         </h1>
-      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3">
           <Link href="/creategroup" className="text-lg" title="New Group">
             ➕
           </Link>
@@ -777,7 +549,28 @@ export default function Chat() {
         />
       </div>
 
+      {groups.length > 0 && (
+        <div>
+          <p className="text-xs text-zinc-500 px-4 pt-2 pb-1">Groups</p>
+          {groups.map((group) => (
+            <Link
+              key={group.id}
+              href={`/groupchat/${group.id}`}
+              className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800 hover:bg-zinc-900 cursor-pointer"
+            >
+              <div className="w-11 h-11 rounded-full bg-purple-500 flex items-center justify-center font-bold flex-shrink-0">
+                {group.name?.charAt(0)?.toUpperCase()}
+              </div>
+              <p className="text-sm font-semibold">{group.name}</p>
+            </Link>
+          ))}
+        </div>
+      )}
+
       <div>
+        {groups.length > 0 && (
+          <p className="text-xs text-zinc-500 px-4 pt-3 pb-1">Chats</p>
+        )}
         {filteredContacts.length === 0 && (
           <p className="text-zinc-500 text-sm p-4">
             No contacts yet — go to the Contacts tab to add someone by username.
