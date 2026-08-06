@@ -16,7 +16,10 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 export async function enableNotifications(userId) {
- console.log(process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY);
+console.log(
+  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.length
+);
   if (!("serviceWorker" in navigator)) {
     console.log("Service Worker not supported");
     return;
