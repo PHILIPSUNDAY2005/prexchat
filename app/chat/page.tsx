@@ -3,12 +3,15 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
+import CallScreen from "../CallScreen";
 
 function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  const bars = [6, 12, 18, 10, 14, 20, 9, 16, 22, 8, 13, 19, 7, 15, 21, 11, 17, 9, 14, 6];
 
   function formatDuration(seconds: number) {
     if (!seconds || isNaN(seconds)) return "0:00";
@@ -26,8 +29,11 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
     }
   }
 
+  const progress = duration ? currentTime / duration : 0;
+  const playedBars = Math.round(progress * bars.length);
+
   return (
-    <div className="flex items-center gap-2 min-w-[160px]">
+    <div className="flex items-center gap-2 min-w-[190px]">
       <audio
         ref={audioRef}
         src={src}
@@ -39,13 +45,22 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
       />
       <button
         onClick={togglePlay}
-        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-          isMine ? "bg-white/20" : "bg-blue-500"
-        }`}
+        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isMine ? "bg-white/20" : "bg-blue-500"
+          }`}
       >
         {isPlaying ? "⏸" : "▶"}
       </button>
-      <span className="text-xs opacity-80">
+      <div className="flex items-end gap-[2px] h-5">
+        {bars.map((h, i) => (
+          <div
+            key={i}
+            className={`w-[3px] rounded-full ${i < playedBars ? "bg-white" : isMine ? "bg-white/40" : "bg-zinc-500"
+              }`}
+            style={{ height: `${h}px` }}
+          />
+        ))}
+      </div>
+      <span className="text-[10px] opacity-80 flex-shrink-0">
         {formatDuration(isPlaying || currentTime > 0 ? currentTime : duration)}
       </span>
     </div>
@@ -63,6 +78,8 @@ const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 </svg>
 `)}`;
 
+const commonEmojis = ["😂", "❤️", "👍", "🔥", "😭", "🙏", "😍", "😅", "🎉", "💯", "😩", "👀", "😊", "🤣", "😢", "🙌"];
+
 export default function Chat() {
   const [userId, setUserId] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -74,6 +91,10 @@ export default function Chat() {
   const [newMessage, setNewMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [contactIsTyping, setContactIsTyping] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [myWallpaper, setMyWallpaper] = useState("");
+  const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
+  const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -82,6 +103,9 @@ export default function Chat() {
   const typingTimeoutRef = useRef<any>(null);
   const lastTypingSentRef = useRef<number>(0);
   const heartbeatRef = useRef<any>(null);
+  const globalChannelRef = useRef<any>(null);
+  const activeContactRef = useRef<any>(null);
+  const contactsRef = useRef<any[]>([]);
 
   useEffect(() => {
     async function getUser() {
@@ -91,6 +115,16 @@ export default function Chat() {
         setFirstName(data.user.user_metadata.first_name || "");
         loadContacts(data.user.id);
         loadGroups(data.user.id);
+
+        const { data: myProfile } = await supabase
+          .from("profiles")
+          .select("wallpaper_url")
+          .eq("id", data.user.id)
+          .maybeSingle();
+
+        if (myProfile?.wallpaper_url) {
+          setMyWallpaper(myProfile.wallpaper_url);
+        }
 
         await supabase
           .from("profiles")
@@ -103,6 +137,38 @@ export default function Chat() {
             .update({ last_active: new Date().toISOString() })
             .eq("id", data.user.id);
         }, 30000);
+
+        if ("Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission();
+        }
+
+        const globalChannel = supabase
+          .channel(`global-messages-${data.user.id}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "messages", filter: `receiver_id=eq.${data.user.id}` },
+            (payload) => {
+              const newMsg = payload.new as any;
+              const isViewingThisChat =
+                document.visibilityState === "visible" &&
+                activeContactRef.current?.id === newMsg.sender_id;
+
+              if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
+                const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
+                const senderName = senderContact?.first_name || "New message";
+                const preview = newMsg.audio_url
+                  ? "🎤 Voice note"
+                  : newMsg.media_url
+                    ? "📷 Photo/Video"
+                    : newMsg.content || "New message";
+
+                new Notification(senderName, { body: preview });
+              }
+            }
+          )
+          .subscribe();
+
+        globalChannelRef.current = globalChannel;
       }
     }
     getUser();
@@ -117,8 +183,19 @@ export default function Chat() {
       if (heartbeatRef.current) {
         clearInterval(heartbeatRef.current);
       }
+      if (globalChannelRef.current) {
+        supabase.removeChannel(globalChannelRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    activeContactRef.current = activeContact;
+  }, [activeContact]);
+
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
 
   async function loadGroups(myId: string) {
     const { data } = await supabase
@@ -209,6 +286,7 @@ export default function Chat() {
   async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
+    setShowEmojiPicker(false);
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
@@ -262,6 +340,21 @@ export default function Chat() {
           }, 2500);
         }
       })
+      .on("broadcast", { event: "call-invite" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          setIncomingCall({
+            type: payload.payload.callType,
+            channelName: payload.payload.channelName,
+            callerName: contact.first_name,
+          });
+        }
+      })
+      .on("broadcast", { event: "call-ended" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          setActiveCall(null);
+          setIncomingCall(null);
+        }
+      })
       .subscribe();
 
     activeChannelRef.current = channel;
@@ -297,6 +390,7 @@ export default function Chat() {
       clearTimeout(typingTimeoutRef.current);
     }
     setContactIsTyping(false);
+    setShowEmojiPicker(false);
     setActiveContact(null);
     loadContacts(userId);
   }
@@ -315,6 +409,47 @@ export default function Chat() {
         payload: { senderId: userId },
       });
     }
+  }
+
+  function buildCallChannelName(idA: string, idB: string) {
+    const clean = (id: string) => id.replace(/-/g, "").slice(0, 16);
+    const sorted = [idA, idB].sort();
+    return `call${clean(sorted[0])}${clean(sorted[1])}`;
+  }
+
+  function startCall(type: "audio" | "video") {
+    if (!activeContact || !activeChannelRef.current) return;
+
+    const channelName = buildCallChannelName(userId, activeContact.id);
+
+    activeChannelRef.current.send({
+      type: "broadcast",
+      event: "call-invite",
+      payload: { senderId: userId, callType: type, channelName },
+    });
+
+    setActiveCall({ type, channelName });
+  }
+
+  function acceptIncomingCall() {
+    if (!incomingCall) return;
+    setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName });
+    setIncomingCall(null);
+  }
+
+  function declineIncomingCall() {
+    setIncomingCall(null);
+  }
+
+  function endCall() {
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: "broadcast",
+        event: "call-ended",
+        payload: { senderId: userId },
+      });
+    }
+    setActiveCall(null);
   }
 
   async function sendMessage() {
@@ -401,12 +536,12 @@ export default function Chat() {
     }
   }
 
-  async function uploadMedia(file: File) {
+  async function uploadOneMedia(file: File) {
     if (!activeContact) return;
 
     const isVideo = file.type.startsWith("video");
     const fileExt = file.name.split(".").pop();
-    const fileName = `${userId}-${Date.now()}.${fileExt}`;
+    const fileName = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExt}`;
 
     const { error: uploadError } = await supabase.storage
       .from("chat-media")
@@ -437,14 +572,57 @@ export default function Chat() {
         if (prev.some((m) => m.id === data.id)) return prev;
         return [...prev, data];
       });
-      loadContacts(userId);
     }
+  }
+
+  async function uploadMultipleMedia(files: FileList) {
+    for (const file of Array.from(files)) {
+      await uploadOneMedia(file);
+    }
+    loadContacts(userId);
+  }
+
+  if (activeCall) {
+    return (
+      <CallScreen
+        channelName={activeCall.channelName}
+        callType={activeCall.type}
+        contactName={activeContact?.first_name || "Contact"}
+        onEnd={endCall}
+      />
+    );
   }
 
   if (activeContact) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
-       <div className="bg-zinc-900 p-3 flex items-center justify-between">
+        {incomingCall && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center">
+            <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center font-bold text-3xl mb-4">
+              {incomingCall.callerName?.charAt(0)}
+            </div>
+            <h2 className="text-xl font-semibold text-white">{incomingCall.callerName}</h2>
+            <p className="text-zinc-400 text-sm mt-1">
+              Incoming {incomingCall.type === "video" ? "video" : "voice"} call…
+            </p>
+            <div className="flex gap-8 mt-8">
+              <button
+                onClick={declineIncomingCall}
+                className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-2xl"
+              >
+                📴
+              </button>
+              <button
+                onClick={acceptIncomingCall}
+                className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center text-2xl"
+              >
+                📞
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="bg-zinc-900 p-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={closeChat} className="text-white text-lg px-1">
               ←
@@ -467,24 +645,31 @@ export default function Chat() {
                 {contactIsTyping
                   ? "typing…"
                   : isOnline(activeContact.last_active)
-                  ? "online"
-                  : "last seen recently"}
+                    ? "online"
+                    : "last seen recently"}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-4 text-lg pr-1">
-            <button title="Video call">🎥</button>
-            <button title="Voice call">📞</button>
-            <button title="More">⋮</button>
+            <button onClick={() => startCall("video")} title="Video call">🎥</button>
+            <button onClick={() => startCall("audio")} title="Voice call">📞</button>
           </div>
         </div>
 
         <div
           className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto"
-          style={{
-            backgroundImage: `url("${wallpaperPattern}")`,
-            backgroundRepeat: "repeat",
-          }}
+          style={
+            myWallpaper
+              ? {
+                backgroundImage: `url("${myWallpaper}")`,
+                backgroundSize: "cover",
+                backgroundPosition: "center",
+              }
+              : {
+                backgroundImage: `url("${wallpaperPattern}")`,
+                backgroundRepeat: "repeat",
+              }
+          }
         >
           {messages.length === 0 && !contactIsTyping && (
             <div className="m-auto text-center text-zinc-500 text-sm">
@@ -497,80 +682,13 @@ export default function Chat() {
           {messages.map((msg) => (
             <div
               key={msg.id}
-              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
-                msg.sender_id === userId
+              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${msg.sender_id === userId
                   ? "bg-blue-500 self-end rounded-br-sm"
                   : "bg-zinc-800 self-start rounded-bl-sm"
-              }`}
+                }`}
             >
               {msg.audio_url ? (
-             function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-
-  const bars = [6, 12, 18, 10, 14, 20, 9, 16, 22, 8, 13, 19, 7, 15, 21, 11, 17, 9, 14, 6];
-
-  function formatDuration(seconds: number) {
-    if (!seconds || isNaN(seconds)) return "0:00";
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  }
-
-  function togglePlay() {
-    if (!audioRef.current) return;
-    if (isPlaying) {
-      audioRef.current.pause();
-    } else {
-      audioRef.current.play();
-    }
-  }
-
-  const progress = duration ? currentTime / duration : 0;
-  const playedBars = Math.round(progress * bars.length);
-
-  return (
-    <div className="flex items-center gap-2 min-w-[190px]">
-      <audio
-        ref={audioRef}
-        src={src}
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onEnded={() => setIsPlaying(false)}
-      />
-      <button
-        onClick={togglePlay}
-        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-          isMine ? "bg-white/20" : "bg-blue-500"
-        }`}
-      >
-        {isPlaying ? "⏸" : "▶"}
-      </button>
-      <div className="flex items-end gap-[2px] h-5">
-        {bars.map((h, i) => (
-          <div
-            key={i}
-            className={`w-[3px] rounded-full ${
-              i < playedBars
-                ? "bg-white"
-                : isMine
-                ? "bg-white/40"
-                : "bg-zinc-500"
-            }`}
-            style={{ height: `${h}px` }}
-          />
-        ))}
-      </div>
-      <span className="text-[10px] opacity-80 flex-shrink-0">
-        {formatDuration(isPlaying || currentTime > 0 ? currentTime : duration)}
-      </span>
-    </div>
-  );
-}
+                <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
               ) : msg.media_url ? (
                 msg.media_type === "video" ? (
                   <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
@@ -596,11 +714,13 @@ export default function Chat() {
           <input
             type="file"
             accept="image/*,video/*"
+            multiple
             className="hidden"
             id="media-input"
             onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) uploadMedia(file);
+              if (e.target.files && e.target.files.length > 0) {
+                uploadMultipleMedia(e.target.files);
+              }
               e.target.value = "";
             }}
           />
@@ -610,6 +730,12 @@ export default function Chat() {
           >
             📎
           </label>
+          <button
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className="text-xl w-10 h-10 flex items-center justify-center flex-shrink-0"
+          >
+            😊
+          </button>
           <input
             type="text"
             value={newMessage}
@@ -628,14 +754,30 @@ export default function Chat() {
           ) : (
             <button
               onClick={isRecording ? stopRecording : startRecording}
-              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
-                isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
-              } text-white`}
+              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
+                } text-white`}
             >
               🎤
             </button>
           )}
         </div>
+
+        {showEmojiPicker && (
+          <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2">
+            {commonEmojis.map((emoji, i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  setNewMessage((prev) => prev + emoji);
+                  setShowEmojiPicker(false);
+                }}
+                className="text-2xl hover:scale-125 transition-transform"
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -710,8 +852,12 @@ export default function Chat() {
           >
             <div className="flex items-center gap-3">
               <div className="relative flex-shrink-0">
-                <div className="w-11 h-11 rounded-full bg-blue-500 flex items-center justify-center font-bold">
-                  {contact.first_name?.charAt(0)}
+                <div className="w-11 h-11 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold">
+                  {contact.avatar_url ? (
+                    <img src={contact.avatar_url} className="w-full h-full object-cover" />
+                  ) : (
+                    contact.first_name?.charAt(0)
+                  )}
                 </div>
                 {isOnline(contact.last_active) && (
                   <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-zinc-950 rounded-full" />
