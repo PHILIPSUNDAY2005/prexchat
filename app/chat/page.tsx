@@ -83,6 +83,14 @@ const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 const commonEmojis = ["😂", "❤️", "👍", "🔥", "😭", "🙏", "😍", "😅", "🎉", "💯", "😩", "👀", "😊", "🤣", "😢", "🙌"];
 const reactionEmojis = ["❤️", "😂", "😮", "😢", "🙏", "👍"];
 
+function getReplyPreview(replyMsg: any) {
+  if (!replyMsg) return "";
+  if (replyMsg.audio_url) return "🎤 Voice note";
+  if (replyMsg.media_type === "video") return "🎥 Video";
+  if (replyMsg.media_type === "image") return "📷 Photo";
+  return replyMsg.content || "";
+}
+
 export default function Chat() {
   const [userId, setUserId] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -101,6 +109,11 @@ export default function Chat() {
   const [viewingPhoto, setViewingPhoto] = useState<string | null>(null);
   const [reactions, setReactions] = useState<Record<string, { emoji: string; user_id: string }[]>>({});
   const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<any>(null);
+  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -113,7 +126,9 @@ export default function Chat() {
   const activeContactRef = useRef<any>(null);
   const contactsRef = useRef<any[]>([]);
   const missedCallTimeoutRef = useRef<any>(null);
-  const longPressTimeoutRef = useRef<any>(null);
+  const touchStartXRef = useRef<number>(0);
+  const touchStartIdRef = useRef<string | null>(null);
+  const suppressClickRef = useRef<boolean>(false);
 
   useEffect(() => {
     async function getUser() {
@@ -241,13 +256,14 @@ export default function Chat() {
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at")
+          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
           .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .limit(5);
+
+        const visibleLastMsg = (lastMsg || []).find((m: any) => !(m.hidden_for || []).includes(myId));
 
         const { count: unreadCount } = await supabase
           .from("messages")
@@ -256,17 +272,17 @@ export default function Chat() {
           .eq("receiver_id", myId)
           .eq("seen", false);
 
-        let preview = lastMsg?.content || "Say hi 👋";
-        if (lastMsg?.call_status === "missed") {
-          preview = `📵 Missed ${lastMsg.call_type === "video" ? "video" : "voice"} call`;
-        } else if (lastMsg?.audio_url) preview = "🎤 Voice note";
-        else if (lastMsg?.media_type === "video") preview = "🎥 Video";
-        else if (lastMsg?.media_type === "image") preview = "📷 Photo";
+        let preview = visibleLastMsg?.content || "Say hi 👋";
+        if (visibleLastMsg?.call_status === "missed") {
+          preview = `📵 Missed ${visibleLastMsg.call_type === "video" ? "video" : "voice"} call`;
+        } else if (visibleLastMsg?.audio_url) preview = "🎤 Voice note";
+        else if (visibleLastMsg?.media_type === "video") preview = "🎥 Video";
+        else if (visibleLastMsg?.media_type === "image") preview = "📷 Photo";
 
         return {
           ...contact,
           lastMessage: preview,
-          lastTime: lastMsg?.created_at || null,
+          lastTime: visibleLastMsg?.created_at || null,
           unreadCount: unreadCount || 0,
         };
       })
@@ -289,13 +305,14 @@ export default function Chat() {
   async function fetchMessages(myId: string, contactId: string) {
     const { data } = await supabase
       .from("messages")
-      .select("*")
+      .select("*, reply_to:reply_to_id(id, content, audio_url, media_url, media_type, sender_id)")
       .or(
         `and(sender_id.eq.${myId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${myId})`
       )
       .order("created_at", { ascending: true });
 
-    return data || [];
+    const all = data || [];
+    return all.filter((m: any) => !(m.hidden_for || []).includes(myId));
   }
 
   async function loadReactions(msgs: any[]) {
@@ -341,20 +358,87 @@ export default function Chat() {
     loadReactions(freshMessages);
   }
 
-  function startLongPress(messageId: string) {
-    longPressTimeoutRef.current = setTimeout(() => {
-      setReactionPickerFor(messageId);
-    }, 500);
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
-  function cancelLongPress() {
-    if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+  function cancelSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  async function deleteForMeSingle(msg: any) {
+    const newHidden = [...(msg.hidden_for || []), userId];
+    await supabase.from("messages").update({ hidden_for: newHidden }).eq("id", msg.id);
+    setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+    loadContacts(userId);
+  }
+
+  async function deleteSelectedForMe() {
+    for (const id of Array.from(selectedIds)) {
+      const msg = messages.find((m) => m.id === id);
+      if (msg) await deleteForMeSingle(msg);
+    }
+    cancelSelectMode();
+  }
+
+  function handleBubbleClick(msg: any) {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (selectMode) {
+      toggleSelect(msg.id);
+      return;
+    }
+    setContextMenuFor(msg.id);
+  }
+
+  function handleBubbleContextMenu(e: React.MouseEvent, msg: any) {
+    e.preventDefault();
+    if (selectMode) return;
+    setContextMenuFor(msg.id);
+  }
+
+  function handleTouchStart(e: React.TouchEvent, msg: any) {
+    if (selectMode) return;
+    touchStartXRef.current = e.touches[0].clientX;
+    touchStartIdRef.current = msg.id;
+  }
+
+  function handleTouchMove(e: React.TouchEvent, msg: any) {
+    if (selectMode || touchStartIdRef.current !== msg.id) return;
+    const diff = e.touches[0].clientX - touchStartXRef.current;
+    if (diff > 0) {
+      setSwipeOffsets((prev) => ({ ...prev, [msg.id]: Math.min(diff, 80) }));
+    }
+  }
+
+  function handleTouchEnd(msg: any) {
+    if (selectMode) return;
+    const offset = swipeOffsets[msg.id] || 0;
+    if (offset > 50) {
+      setReplyingTo(msg);
+      setContextMenuFor(null);
+      suppressClickRef.current = true;
+    }
+    setSwipeOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
+    touchStartIdRef.current = null;
   }
 
   async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
     setShowEmojiPicker(false);
+    setReplyingTo(null);
+    setContextMenuFor(null);
+    setSelectMode(false);
+    setSelectedIds(new Set());
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
@@ -381,19 +465,16 @@ export default function Chat() {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
-        (payload) => {
+        async (payload) => {
           const newMsg = payload.new as any;
           const isRelevant =
             (newMsg.sender_id === userId && newMsg.receiver_id === contact.id) ||
             (newMsg.sender_id === contact.id && newMsg.receiver_id === userId);
 
           if (isRelevant) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === newMsg.id)) return prev;
-              const updated = [...prev, newMsg];
-              loadReactions(updated);
-              return updated;
-            });
+            const fresh = await fetchMessages(userId, contact.id);
+            setMessages(fresh);
+            loadReactions(fresh);
             loadContacts(userId);
 
             if (newMsg.sender_id === contact.id) {
@@ -475,6 +556,10 @@ export default function Chat() {
     setContactIsTyping(false);
     setShowEmojiPicker(false);
     setReactionPickerFor(null);
+    setReplyingTo(null);
+    setContextMenuFor(null);
+    setSelectMode(false);
+    setSelectedIds(new Set());
     setActiveContact(null);
     loadContacts(userId);
   }
@@ -561,22 +646,19 @@ export default function Chat() {
   async function sendMessage() {
     if (!newMessage || !activeContact) return;
 
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        sender_id: userId,
-        receiver_id: activeContact.id,
-        content: newMessage,
-      })
-      .select()
-      .single();
+    const { error } = await supabase.from("messages").insert({
+      sender_id: userId,
+      receiver_id: activeContact.id,
+      content: newMessage,
+      reply_to_id: replyingTo ? replyingTo.id : null,
+    });
 
-    if (!error && data) {
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === data.id)) return prev;
-        return [...prev, data];
-      });
+    if (!error) {
       setNewMessage("");
+      setReplyingTo(null);
+      const fresh = await fetchMessages(userId, activeContact.id);
+      setMessages(fresh);
+      loadReactions(fresh);
       loadContacts(userId);
     }
   }
@@ -623,26 +705,23 @@ export default function Chat() {
       .from("voice-notes")
       .getPublicUrl(fileName);
 
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        sender_id: userId,
-        receiver_id: activeContact.id,
-        audio_url: urlData.publicUrl,
-      })
-      .select()
-      .single();
+    const { error } = await supabase.from("messages").insert({
+      sender_id: userId,
+      receiver_id: activeContact.id,
+      audio_url: urlData.publicUrl,
+      reply_to_id: replyingTo ? replyingTo.id : null,
+    });
 
-    if (!error && data) {
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === data.id)) return prev;
-        return [...prev, data];
-      });
+    if (!error) {
+      setReplyingTo(null);
+      const fresh = await fetchMessages(userId, activeContact.id);
+      setMessages(fresh);
+      loadReactions(fresh);
       loadContacts(userId);
     }
   }
 
-  async function uploadOneMedia(file: File) {
+  async function uploadOneMedia(file: File, replyId: string | null) {
     if (!activeContact) return;
 
     const isVideo = file.type.startsWith("video");
@@ -662,29 +741,24 @@ export default function Chat() {
       .from("chat-media")
       .getPublicUrl(fileName);
 
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        sender_id: userId,
-        receiver_id: activeContact.id,
-        media_url: urlData.publicUrl,
-        media_type: isVideo ? "video" : "image",
-      })
-      .select()
-      .single();
-
-    if (!error && data) {
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === data.id)) return prev;
-        return [...prev, data];
-      });
-    }
+    await supabase.from("messages").insert({
+      sender_id: userId,
+      receiver_id: activeContact.id,
+      media_url: urlData.publicUrl,
+      media_type: isVideo ? "video" : "image",
+      reply_to_id: replyId,
+    });
   }
 
   async function uploadMultipleMedia(files: FileList) {
+    const replyId = replyingTo ? replyingTo.id : null;
     for (const file of Array.from(files)) {
-      await uploadOneMedia(file);
+      await uploadOneMedia(file, replyId);
     }
+    setReplyingTo(null);
+    const fresh = await fetchMessages(userId, activeContact.id);
+    setMessages(fresh);
+    loadReactions(fresh);
     loadContacts(userId);
   }
 
@@ -738,10 +812,13 @@ export default function Chat() {
           </div>
         )}
 
-        {reactionPickerFor && (
+        {(reactionPickerFor || contextMenuFor) && (
           <div
             className="fixed inset-0 z-40"
-            onClick={() => setReactionPickerFor(null)}
+            onClick={() => {
+              setReactionPickerFor(null);
+              setContextMenuFor(null);
+            }}
           />
         )}
 
@@ -782,6 +859,22 @@ export default function Chat() {
           </div>
         </div>
 
+        {selectMode && (
+          <div className="bg-zinc-900 border-b border-zinc-800 px-3 py-2 flex items-center justify-between">
+            <button onClick={cancelSelectMode} className="text-sm text-zinc-300">
+              Cancel
+            </button>
+            <span className="text-sm text-zinc-400">{selectedIds.size} selected</span>
+            <button
+              onClick={deleteSelectedForMe}
+              disabled={selectedIds.size === 0}
+              className="text-sm text-red-400 disabled:opacity-40"
+            >
+              Delete for me
+            </button>
+          </div>
+        )}
+
         <div
           className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto"
           style={
@@ -807,85 +900,176 @@ export default function Chat() {
 
           {messages.map((msg) =>
             msg.call_status === "missed" ? (
-              <div
-                key={msg.id}
-                className={`max-w-[75%] flex items-center gap-2 p-2 px-3 rounded-2xl text-sm ${
-                  msg.sender_id === userId
-                    ? "bg-zinc-800/60 self-end rounded-br-sm"
-                    : "bg-zinc-800/60 self-start rounded-bl-sm"
-                }`}
-              >
-                <span className="text-red-400">📵</span>
-                <span className="text-zinc-300">
-                  {msg.sender_id === userId
-                    ? `Missed ${msg.call_type === "video" ? "video" : "voice"} call`
-                    : `Missed ${msg.call_type === "video" ? "video" : "voice"} call from ${activeContact.first_name}`}
-                </span>
+              <div key={msg.id} className="flex items-center gap-2 w-full">
+                {selectMode && <div className="w-5 flex-shrink-0" />}
+                <div
+                  className={`flex-1 flex ${msg.sender_id === userId ? "justify-end" : "justify-start"}`}
+                >
+                  <div className="max-w-[75%] flex items-center gap-2 p-2 px-3 rounded-2xl text-sm bg-zinc-800/60">
+                    <span className="text-red-400">📵</span>
+                    <span className="text-zinc-300">
+                      {msg.sender_id === userId
+                        ? `Missed ${msg.call_type === "video" ? "video" : "voice"} call`
+                        : `Missed ${msg.call_type === "video" ? "video" : "voice"} call from ${activeContact.first_name}`}
+                    </span>
+                  </div>
+                </div>
               </div>
             ) : (
-              <div
-                key={msg.id}
-                className={`relative max-w-[70%] flex flex-col ${
-                  msg.sender_id === userId ? "self-end items-end" : "self-start items-start"
-                }`}
-              >
-                {reactionPickerFor === msg.id && (
-                  <div
-                    className={`absolute -top-12 z-50 bg-zinc-800 rounded-full px-2 py-1 flex gap-1 shadow-lg ${
-                      msg.sender_id === userId ? "right-0" : "left-0"
+              <div key={msg.id} className="flex items-center gap-2 w-full">
+                {selectMode && (
+                  <button
+                    onClick={() => toggleSelect(msg.id)}
+                    className={`w-5 h-5 rounded-full border flex-shrink-0 flex items-center justify-center text-[10px] ${
+                      selectedIds.has(msg.id) ? "bg-blue-500 border-blue-500" : "border-zinc-500"
                     }`}
-                    onClick={(e) => e.stopPropagation()}
                   >
-                    {reactionEmojis.map((emoji) => (
-                      <button
-                        key={emoji}
-                        onClick={() => toggleReaction(msg.id, emoji)}
-                        className="text-xl hover:scale-125 transition-transform p-1"
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
+                    {selectedIds.has(msg.id) && "✓"}
+                  </button>
                 )}
 
                 <div
-                  onMouseDown={() => startLongPress(msg.id)}
-                  onMouseUp={cancelLongPress}
-                  onMouseLeave={cancelLongPress}
-                  onTouchStart={() => startLongPress(msg.id)}
-                  onTouchEnd={cancelLongPress}
-                  className={`p-2 px-3 rounded-2xl text-sm select-none ${
-                    msg.sender_id === userId
-                      ? "bg-blue-500 rounded-br-sm"
-                      : "bg-zinc-800 rounded-bl-sm"
-                  }`}
+                  className={`flex-1 flex ${msg.sender_id === userId ? "justify-end" : "justify-start"}`}
                 >
-                  {msg.audio_url ? (
-                    <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
-                  ) : msg.media_url ? (
-                    msg.media_type === "video" ? (
-                      <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
-                    ) : (
-                      <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
-                    )
-                  ) : (
-                    msg.content
-                  )}
-                </div>
+                  <div className="relative max-w-[70%] flex flex-col">
+                    {contextMenuFor === msg.id && (
+                      <div
+                        className={`absolute -top-2 z-50 bg-zinc-800 rounded-lg shadow-lg overflow-hidden text-sm w-44 ${
+                          msg.sender_id === userId ? "right-0" : "left-0"
+                        }`}
+                        style={{ transform: "translateY(-100%)" }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          onClick={() => {
+                            setReplyingTo(msg);
+                            setContextMenuFor(null);
+                          }}
+                          className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                        >
+                          ↩ Reply
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectMode(true);
+                            setSelectedIds(new Set([msg.id]));
+                            setContextMenuFor(null);
+                          }}
+                          className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                        >
+                          ☑ Select
+                        </button>
+                        <button
+                          onClick={() => {
+                            deleteForMeSingle(msg);
+                            setContextMenuFor(null);
+                          }}
+                          className="w-full text-left px-4 py-2 hover:bg-zinc-700 text-red-400"
+                        >
+                          🗑 Delete for me
+                        </button>
+                        <button
+                          onClick={() => {
+                            setReactionPickerFor(msg.id);
+                            setContextMenuFor(null);
+                          }}
+                          className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                        >
+                          ❤️ React
+                        </button>
+                      </div>
+                    )}
 
-                {reactions[msg.id] && reactions[msg.id].length > 0 && (
-                  <div
-                    className={`flex gap-1 -mt-2 bg-zinc-900 rounded-full px-1.5 py-0.5 border border-zinc-800 ${
-                      msg.sender_id === userId ? "mr-2" : "ml-2"
-                    }`}
-                  >
-                    {Array.from(new Set(reactions[msg.id].map((r) => r.emoji))).map((emoji) => (
-                      <span key={emoji} className="text-xs">
-                        {emoji}
-                      </span>
-                    ))}
+                    {reactionPickerFor === msg.id && (
+                      <div
+                        className={`absolute -top-12 z-50 bg-zinc-800 rounded-full px-2 py-1 flex gap-1 shadow-lg ${
+                          msg.sender_id === userId ? "right-0" : "left-0"
+                        }`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {reactionEmojis.map((emoji) => (
+                          <button
+                            key={emoji}
+                            onClick={() => toggleReaction(msg.id, emoji)}
+                            className="text-xl hover:scale-125 transition-transform p-1"
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="relative">
+                      {(swipeOffsets[msg.id] || 0) > 10 && (
+                        <span
+                          className="absolute top-1/2 -translate-y-1/2 -left-7 text-lg"
+                          style={{ opacity: Math.min((swipeOffsets[msg.id] || 0) / 50, 1) }}
+                        >
+                          ↩
+                        </span>
+                      )}
+                      <div
+                        onClick={() => handleBubbleClick(msg)}
+                        onContextMenu={(e) => handleBubbleContextMenu(e, msg)}
+                        onTouchStart={(e) => handleTouchStart(e, msg)}
+                        onTouchMove={(e) => handleTouchMove(e, msg)}
+                        onTouchEnd={() => handleTouchEnd(msg)}
+                        style={{
+                          transform: `translateX(${swipeOffsets[msg.id] || 0}px)`,
+                          transition: swipeOffsets[msg.id] ? "none" : "transform 0.2s",
+                        }}
+                        className={`p-2 px-3 rounded-2xl text-sm select-none cursor-pointer ${
+                          msg.sender_id === userId
+                            ? "bg-blue-500 rounded-br-sm"
+                            : "bg-zinc-800 rounded-bl-sm"
+                        }`}
+                      >
+                        {msg.reply_to && (
+                          <div
+                            className={`mb-1 pl-2 border-l-2 rounded text-xs opacity-80 ${
+                              msg.sender_id === userId ? "border-white/60" : "border-blue-400"
+                            }`}
+                          >
+                            <p className="font-semibold">
+                              {msg.reply_to.sender_id === userId ? "You" : activeContact.first_name}
+                            </p>
+                            <p className="truncate max-w-[200px]">{getReplyPreview(msg.reply_to)}</p>
+                          </div>
+                        )}
+
+                        {msg.audio_url ? (
+                          <div onClick={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}>
+                            <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
+                          </div>
+                        ) : msg.media_url ? (
+                          <div onClick={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}>
+                            {msg.media_type === "video" ? (
+                              <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                            ) : (
+                              <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
+                            )}
+                          </div>
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
+                    </div>
+
+                    {reactions[msg.id] && reactions[msg.id].length > 0 && (
+                      <div
+                        className={`flex gap-1 -mt-2 bg-zinc-900 rounded-full px-1.5 py-0.5 border border-zinc-800 self-start ${
+                          msg.sender_id === userId ? "self-end mr-2" : "ml-2"
+                        }`}
+                      >
+                        {Array.from(new Set(reactions[msg.id].map((r) => r.emoji))).map((emoji) => (
+                          <span key={emoji} className="text-xs">
+                            {emoji}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
               </div>
             )
           )}
@@ -898,6 +1082,20 @@ export default function Chat() {
             </div>
           )}
         </div>
+
+        {replyingTo && (
+          <div className="bg-zinc-800 border-t border-zinc-700 px-3 py-2 flex items-center gap-2">
+            <div className="flex-1 border-l-4 border-blue-500 pl-2 min-w-0">
+              <p className="text-xs font-semibold text-blue-400">
+                {replyingTo.sender_id === userId ? "You" : activeContact.first_name}
+              </p>
+              <p className="text-xs text-zinc-300 truncate">{getReplyPreview(replyingTo)}</p>
+            </div>
+            <button onClick={() => setReplyingTo(null)} className="text-zinc-400 text-lg px-2 flex-shrink-0">
+              ✕
+            </button>
+          </div>
+        )}
 
         <div className="p-2 bg-zinc-900 flex items-center gap-2">
           <input
