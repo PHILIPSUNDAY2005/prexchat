@@ -584,10 +584,11 @@ export default function Chat() {
 
   if (activeCall) {
     return (
-      <CallScreen
+     <CallScreen
         channelName={activeCall.channelName}
         callType={activeCall.type}
         contactName={activeContact?.first_name || "Contact"}
+        contactAvatar={activeContact?.avatar_url}
         onEnd={endCall}
       />
     );
