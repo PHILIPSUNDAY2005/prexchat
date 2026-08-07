@@ -109,6 +109,7 @@ export default function Chat() {
   const globalChannelRef = useRef<any>(null);
   const activeContactRef = useRef<any>(null);
   const contactsRef = useRef<any[]>([]);
+  const missedCallTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     async function getUser() {
@@ -159,7 +160,9 @@ export default function Chat() {
               if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
                 const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
                 const senderName = senderContact?.first_name || "New message";
-                const preview = newMsg.audio_url
+                const preview = newMsg.call_status === "missed"
+                  ? `Missed ${newMsg.call_type === "video" ? "video" : "voice"} call`
+                  : newMsg.audio_url
                   ? "🎤 Voice note"
                   : newMsg.media_url
                   ? "📷 Photo/Video"
@@ -188,6 +191,9 @@ export default function Chat() {
       }
       if (globalChannelRef.current) {
         supabase.removeChannel(globalChannelRef.current);
+      }
+      if (missedCallTimeoutRef.current) {
+        clearTimeout(missedCallTimeoutRef.current);
       }
     };
   }, []);
@@ -231,7 +237,7 @@ export default function Chat() {
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, media_url, media_type, created_at")
+          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
@@ -247,7 +253,9 @@ export default function Chat() {
           .eq("seen", false);
 
         let preview = lastMsg?.content || "Say hi 👋";
-        if (lastMsg?.audio_url) preview = "🎤 Voice note";
+        if (lastMsg?.call_status === "missed") {
+          preview = `📵 Missed ${lastMsg.call_type === "video" ? "video" : "voice"} call`;
+        } else if (lastMsg?.audio_url) preview = "🎤 Voice note";
         else if (lastMsg?.media_type === "video") preview = "🎥 Video";
         else if (lastMsg?.media_type === "image") preview = "📷 Photo";
 
@@ -354,6 +362,7 @@ export default function Chat() {
       })
       .on("broadcast", { event: "call-ended" }, (payload) => {
         if (payload.payload.senderId === contact.id) {
+          if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
           setActiveCall(null);
           setIncomingCall(null);
         }
@@ -432,10 +441,31 @@ export default function Chat() {
     });
 
     setActiveCall({ type, channelName });
+
+    if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
+    missedCallTimeoutRef.current = setTimeout(async () => {
+      await supabase.from("messages").insert({
+        sender_id: userId,
+        receiver_id: activeContact.id,
+        call_type: type,
+        call_status: "missed",
+      });
+      loadContacts(userId);
+
+      if (activeChannelRef.current) {
+        activeChannelRef.current.send({
+          type: "broadcast",
+          event: "call-ended",
+          payload: { senderId: userId },
+        });
+      }
+      setActiveCall(null);
+    }, 30000);
   }
 
   function acceptIncomingCall() {
     if (!incomingCall) return;
+    if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
     setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName });
     setIncomingCall(null);
   }
@@ -445,6 +475,7 @@ export default function Chat() {
   }
 
   function endCall() {
+    if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
     if (activeChannelRef.current) {
       activeChannelRef.current.send({
         type: "broadcast",
@@ -695,28 +726,46 @@ export default function Chat() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
-                msg.sender_id === userId
-                  ? "bg-blue-500 self-end rounded-br-sm"
-                  : "bg-zinc-800 self-start rounded-bl-sm"
-              }`}
-            >
-              {msg.audio_url ? (
-                <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
-              ) : msg.media_url ? (
-                msg.media_type === "video" ? (
-                  <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+          {messages.map((msg) =>
+            msg.call_status === "missed" ? (
+              <div
+                key={msg.id}
+                className={`max-w-[75%] flex items-center gap-2 p-2 px-3 rounded-2xl text-sm ${
+                  msg.sender_id === userId
+                    ? "bg-zinc-800/60 self-end rounded-br-sm"
+                    : "bg-zinc-800/60 self-start rounded-bl-sm"
+                }`}
+              >
+                <span className="text-red-400">📵</span>
+                <span className="text-zinc-300">
+                  {msg.sender_id === userId
+                    ? `Missed ${msg.call_type === "video" ? "video" : "voice"} call`
+                    : `Missed ${msg.call_type === "video" ? "video" : "voice"} call from ${activeContact.first_name}`}
+                </span>
+              </div>
+            ) : (
+              <div
+                key={msg.id}
+                className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
+                  msg.sender_id === userId
+                    ? "bg-blue-500 self-end rounded-br-sm"
+                    : "bg-zinc-800 self-start rounded-bl-sm"
+                }`}
+              >
+                {msg.audio_url ? (
+                  <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
+                ) : msg.media_url ? (
+                  msg.media_type === "video" ? (
+                    <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                  ) : (
+                    <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
+                  )
                 ) : (
-                  <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
-                )
-              ) : (
-                msg.content
-              )}
-            </div>
-          ))}
+                  msg.content
+                )}
+              </div>
+            )
+          )}
 
           {contactIsTyping && (
             <div className="bg-zinc-800 self-start rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
