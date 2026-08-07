@@ -81,6 +81,7 @@ const wallpaperPattern = `data:image/svg+xml;utf8,${encodeURIComponent(`
 `)}`;
 
 const commonEmojis = ["😂", "❤️", "👍", "🔥", "😭", "🙏", "😍", "😅", "🎉", "💯", "😩", "👀", "😊", "🤣", "😢", "🙌"];
+const reactionEmojis = ["❤️", "😂", "😮", "😢", "🙏", "👍"];
 
 export default function Chat() {
   const [userId, setUserId] = useState("");
@@ -98,6 +99,8 @@ export default function Chat() {
   const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
   const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
   const [viewingPhoto, setViewingPhoto] = useState<string | null>(null);
+  const [reactions, setReactions] = useState<Record<string, { emoji: string; user_id: string }[]>>({});
+  const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -110,6 +113,7 @@ export default function Chat() {
   const activeContactRef = useRef<any>(null);
   const contactsRef = useRef<any[]>([]);
   const missedCallTimeoutRef = useRef<any>(null);
+  const longPressTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     async function getUser() {
@@ -294,6 +298,59 @@ export default function Chat() {
     return data || [];
   }
 
+  async function loadReactions(msgs: any[]) {
+    if (msgs.length === 0) return;
+    const ids = msgs.map((m) => m.id);
+
+    const { data } = await supabase
+      .from("message_reactions")
+      .select("message_id, emoji, user_id")
+      .in("message_id", ids);
+
+    if (data) {
+      const grouped: Record<string, { emoji: string; user_id: string }[]> = {};
+      data.forEach((r: any) => {
+        if (!grouped[r.message_id]) grouped[r.message_id] = [];
+        grouped[r.message_id].push({ emoji: r.emoji, user_id: r.user_id });
+      });
+      setReactions(grouped);
+    }
+  }
+
+  async function toggleReaction(messageId: string, emoji: string) {
+    const existing = reactions[messageId]?.find((r) => r.user_id === userId);
+
+    if (existing && existing.emoji === emoji) {
+      await supabase
+        .from("message_reactions")
+        .delete()
+        .eq("message_id", messageId)
+        .eq("user_id", userId);
+    } else {
+      await supabase
+        .from("message_reactions")
+        .upsert(
+          { message_id: messageId, user_id: userId, emoji },
+          { onConflict: "message_id,user_id" }
+        );
+    }
+
+    setReactionPickerFor(null);
+    const freshMessages = await fetchMessages(userId, activeContact.id);
+    setMessages(freshMessages);
+    loadReactions(freshMessages);
+  }
+
+  function startLongPress(messageId: string) {
+    longPressTimeoutRef.current = setTimeout(() => {
+      setReactionPickerFor(messageId);
+    }, 500);
+  }
+
+  function cancelLongPress() {
+    if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+  }
+
   async function openChat(contact: any) {
     setActiveContact(contact);
     setContactIsTyping(false);
@@ -301,6 +358,7 @@ export default function Chat() {
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
+    loadReactions(initialMessages);
 
     await supabase
       .from("messages")
@@ -332,7 +390,9 @@ export default function Chat() {
           if (isRelevant) {
             setMessages((prev) => {
               if (prev.some((m) => m.id === newMsg.id)) return prev;
-              return [...prev, newMsg];
+              const updated = [...prev, newMsg];
+              loadReactions(updated);
+              return updated;
             });
             loadContacts(userId);
 
@@ -340,6 +400,16 @@ export default function Chat() {
               supabase.from("messages").update({ seen: true }).eq("id", newMsg.id);
             }
           }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "message_reactions" },
+        () => {
+          setMessages((prev) => {
+            loadReactions(prev);
+            return prev;
+          });
         }
       )
       .on("broadcast", { event: "typing" }, (payload) => {
@@ -374,6 +444,7 @@ export default function Chat() {
     pollIntervalRef.current = setInterval(async () => {
       const freshData = await fetchMessages(userId, contact.id);
       setMessages(freshData);
+      loadReactions(freshData);
 
       const { data: freshProfile } = await supabase
         .from("profiles")
@@ -403,6 +474,7 @@ export default function Chat() {
     }
     setContactIsTyping(false);
     setShowEmojiPicker(false);
+    setReactionPickerFor(null);
     setActiveContact(null);
     loadContacts(userId);
   }
@@ -666,6 +738,13 @@ export default function Chat() {
           </div>
         )}
 
+        {reactionPickerFor && (
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setReactionPickerFor(null)}
+          />
+        )}
+
         <div className="bg-zinc-900 p-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={closeChat} className="text-white text-lg px-1">
@@ -746,22 +825,66 @@ export default function Chat() {
             ) : (
               <div
                 key={msg.id}
-                className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
-                  msg.sender_id === userId
-                    ? "bg-blue-500 self-end rounded-br-sm"
-                    : "bg-zinc-800 self-start rounded-bl-sm"
+                className={`relative max-w-[70%] flex flex-col ${
+                  msg.sender_id === userId ? "self-end items-end" : "self-start items-start"
                 }`}
               >
-                {msg.audio_url ? (
-                  <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
-                ) : msg.media_url ? (
-                  msg.media_type === "video" ? (
-                    <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                {reactionPickerFor === msg.id && (
+                  <div
+                    className={`absolute -top-12 z-50 bg-zinc-800 rounded-full px-2 py-1 flex gap-1 shadow-lg ${
+                      msg.sender_id === userId ? "right-0" : "left-0"
+                    }`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {reactionEmojis.map((emoji) => (
+                      <button
+                        key={emoji}
+                        onClick={() => toggleReaction(msg.id, emoji)}
+                        className="text-xl hover:scale-125 transition-transform p-1"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div
+                  onMouseDown={() => startLongPress(msg.id)}
+                  onMouseUp={cancelLongPress}
+                  onMouseLeave={cancelLongPress}
+                  onTouchStart={() => startLongPress(msg.id)}
+                  onTouchEnd={cancelLongPress}
+                  className={`p-2 px-3 rounded-2xl text-sm select-none ${
+                    msg.sender_id === userId
+                      ? "bg-blue-500 rounded-br-sm"
+                      : "bg-zinc-800 rounded-bl-sm"
+                  }`}
+                >
+                  {msg.audio_url ? (
+                    <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
+                  ) : msg.media_url ? (
+                    msg.media_type === "video" ? (
+                      <video controls src={msg.media_url} className="max-w-[220px] rounded-lg" />
+                    ) : (
+                      <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
+                    )
                   ) : (
-                    <img src={msg.media_url} alt="Shared photo" className="max-w-[220px] rounded-lg" />
-                  )
-                ) : (
-                  msg.content
+                    msg.content
+                  )}
+                </div>
+
+                {reactions[msg.id] && reactions[msg.id].length > 0 && (
+                  <div
+                    className={`flex gap-1 -mt-2 bg-zinc-900 rounded-full px-1.5 py-0.5 border border-zinc-800 ${
+                      msg.sender_id === userId ? "mr-2" : "ml-2"
+                    }`}
+                  >
+                    {Array.from(new Set(reactions[msg.id].map((r) => r.emoji))).map((emoji) => (
+                      <span key={emoji} className="text-xs">
+                        {emoji}
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
             )
