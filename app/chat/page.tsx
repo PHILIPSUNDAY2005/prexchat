@@ -45,8 +45,9 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
       />
       <button
         onClick={togglePlay}
-        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isMine ? "bg-white/20" : "bg-blue-500"
-          }`}
+        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+          isMine ? "bg-white/20" : "bg-blue-500"
+        }`}
       >
         {isPlaying ? "⏸" : "▶"}
       </button>
@@ -54,8 +55,9 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
         {bars.map((h, i) => (
           <div
             key={i}
-            className={`w-[3px] rounded-full ${i < playedBars ? "bg-white" : isMine ? "bg-white/40" : "bg-zinc-500"
-              }`}
+            className={`w-[3px] rounded-full ${
+              i < playedBars ? "bg-white" : isMine ? "bg-white/40" : "bg-zinc-500"
+            }`}
             style={{ height: `${h}px` }}
           />
         ))}
@@ -95,6 +97,7 @@ export default function Chat() {
   const [myWallpaper, setMyWallpaper] = useState("");
   const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
   const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
+  const [viewingPhoto, setViewingPhoto] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -159,8 +162,8 @@ export default function Chat() {
                 const preview = newMsg.audio_url
                   ? "🎤 Voice note"
                   : newMsg.media_url
-                    ? "📷 Photo/Video"
-                    : newMsg.content || "New message";
+                  ? "📷 Photo/Video"
+                  : newMsg.content || "New message";
 
                 new Notification(senderName, { body: preview });
               }
@@ -584,7 +587,7 @@ export default function Chat() {
 
   if (activeCall) {
     return (
-     <CallScreen
+      <CallScreen
         channelName={activeCall.channelName}
         callType={activeCall.type}
         contactName={activeContact?.first_name || "Contact"}
@@ -597,6 +600,15 @@ export default function Chat() {
   if (activeContact) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+        {viewingPhoto && (
+          <div
+            className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
+            onClick={() => setViewingPhoto(null)}
+          >
+            <img src={viewingPhoto} className="max-w-[90%] max-h-[80%] rounded-lg object-contain" />
+          </div>
+        )}
+
         {incomingCall && (
           <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center">
             <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center font-bold text-3xl mb-4">
@@ -628,7 +640,10 @@ export default function Chat() {
             <button onClick={closeChat} className="text-white text-lg px-1">
               ←
             </button>
-            <div className="relative flex-shrink-0">
+            <div
+              className="relative flex-shrink-0 cursor-pointer"
+              onClick={() => activeContact.avatar_url && setViewingPhoto(activeContact.avatar_url)}
+            >
               <div className="w-9 h-9 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold text-sm">
                 {activeContact.avatar_url ? (
                   <img src={activeContact.avatar_url} className="w-full h-full object-cover" />
@@ -646,8 +661,8 @@ export default function Chat() {
                 {contactIsTyping
                   ? "typing…"
                   : isOnline(activeContact.last_active)
-                    ? "online"
-                    : "last seen recently"}
+                  ? "online"
+                  : "last seen recently"}
               </p>
             </div>
           </div>
@@ -662,14 +677,14 @@ export default function Chat() {
           style={
             myWallpaper
               ? {
-                backgroundImage: `url("${myWallpaper}")`,
-                backgroundSize: "cover",
-                backgroundPosition: "center",
-              }
+                  backgroundImage: `url("${myWallpaper}")`,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                }
               : {
-                backgroundImage: `url("${wallpaperPattern}")`,
-                backgroundRepeat: "repeat",
-              }
+                  backgroundImage: `url("${wallpaperPattern}")`,
+                  backgroundRepeat: "repeat",
+                }
           }
         >
           {messages.length === 0 && !contactIsTyping && (
@@ -683,10 +698,11 @@ export default function Chat() {
           {messages.map((msg) => (
             <div
               key={msg.id}
-              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${msg.sender_id === userId
+              className={`max-w-[70%] p-2 px-3 rounded-2xl text-sm ${
+                msg.sender_id === userId
                   ? "bg-blue-500 self-end rounded-br-sm"
                   : "bg-zinc-800 self-start rounded-bl-sm"
-                }`}
+              }`}
             >
               {msg.audio_url ? (
                 <VoiceNotePlayer src={msg.audio_url} isMine={msg.sender_id === userId} />
@@ -755,8 +771,9 @@ export default function Chat() {
           ) : (
             <button
               onClick={isRecording ? stopRecording : startRecording}
-              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
-                } text-white`}
+              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
+              } text-white`}
             >
               🎤
             </button>
