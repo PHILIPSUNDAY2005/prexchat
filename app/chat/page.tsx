@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import Link from "next/link";
 import CallScreen from "../CallScreen";
+import { getOrCreateKeyPair, exportPublicKeyBase64, importPublicKeyBase64, deriveSharedKey, encryptText, decryptText } from "../crypto";
 
 function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -114,6 +115,7 @@ export default function Chat() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
+  const [myKeyPair, setMyKeyPair] = useState<CryptoKeyPair | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -136,6 +138,12 @@ export default function Chat() {
       if (data?.user) {
         setUserId(data.user.id);
         setFirstName(data.user.user_metadata.first_name || "");
+
+        const keyPair = await getOrCreateKeyPair(data.user.id);
+        setMyKeyPair(keyPair);
+        const myPublicKeyB64 = await exportPublicKeyBase64(keyPair.publicKey);
+        await supabase.from("profiles").update({ public_key: myPublicKeyB64 }).eq("id", data.user.id);
+
         loadContacts(data.user.id);
         loadGroups(data.user.id);
 
@@ -179,7 +187,9 @@ export default function Chat() {
               if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
                 const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
                 const senderName = senderContact?.first_name || "New message";
-                const preview = newMsg.call_status === "missed"
+                const preview = newMsg.is_encrypted
+                  ? "New message"
+                  : newMsg.call_status === "missed"
                   ? `Missed ${newMsg.call_type === "video" ? "video" : "voice"} call`
                   : newMsg.audio_url
                   ? "🎤 Voice note"
@@ -245,7 +255,7 @@ export default function Chat() {
   async function loadContacts(myId: string) {
     const { data: contactRows } = await supabase
       .from("contacts")
-      .select("contact_id, profiles:contact_id(id, first_name, last_active, avatar_url)")
+      .select("contact_id, profiles:contact_id(id, first_name, last_active, avatar_url, public_key)")
       .eq("user_id", myId);
 
     if (!contactRows) return;
@@ -256,7 +266,7 @@ export default function Chat() {
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for")
+          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for, is_encrypted")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
@@ -273,7 +283,9 @@ export default function Chat() {
           .eq("seen", false);
 
         let preview = visibleLastMsg?.content || "Say hi 👋";
-        if (visibleLastMsg?.call_status === "missed") {
+        if (visibleLastMsg?.is_encrypted) {
+          preview = "🔒 Encrypted message";
+        } else if (visibleLastMsg?.call_status === "missed") {
           preview = `📵 Missed ${visibleLastMsg.call_type === "video" ? "video" : "voice"} call`;
         } else if (visibleLastMsg?.audio_url) preview = "🎤 Voice note";
         else if (visibleLastMsg?.media_type === "video") preview = "🎥 Video";
@@ -302,17 +314,49 @@ export default function Chat() {
     return Date.now() - new Date(lastActive).getTime() < 60000;
   }
 
+  async function getSharedKeyForContact(contactId: string): Promise<CryptoKey | null> {
+    if (!myKeyPair) return null;
+    const { data } = await supabase.from("profiles").select("public_key").eq("id", contactId).maybeSingle();
+    if (!data?.public_key) return null;
+    try {
+      const theirPublicKey = await importPublicKeyBase64(data.public_key);
+      return await deriveSharedKey(myKeyPair.privateKey, theirPublicKey);
+    } catch {
+      return null;
+    }
+  }
+
   async function fetchMessages(myId: string, contactId: string) {
     const { data } = await supabase
       .from("messages")
-      .select("*, reply_to:reply_to_id(id, content, audio_url, media_url, media_type, sender_id)")
+      .select("*, reply_to:reply_to_id(id, content, encrypted_content, iv, is_encrypted, audio_url, media_url, media_type, sender_id)")
       .or(
         `and(sender_id.eq.${myId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${myId})`
       )
       .order("created_at", { ascending: true });
 
-    const all = data || [];
-    return all.filter((m: any) => !(m.hidden_for || []).includes(myId));
+    const all = (data || []).filter((m: any) => !(m.hidden_for || []).includes(myId));
+
+    const sharedKey = await getSharedKeyForContact(contactId);
+
+    for (const m of all) {
+      if (m.is_encrypted && m.encrypted_content && m.iv && sharedKey) {
+        try {
+          m.content = await decryptText(sharedKey, m.encrypted_content, m.iv);
+        } catch {
+          m.content = "🔒 Unable to decrypt";
+        }
+      }
+      if (m.reply_to?.is_encrypted && m.reply_to.encrypted_content && m.reply_to.iv && sharedKey) {
+        try {
+          m.reply_to.content = await decryptText(sharedKey, m.reply_to.encrypted_content, m.reply_to.iv);
+        } catch {
+          m.reply_to.content = "🔒 Unable to decrypt";
+        }
+      }
+    }
+
+    return all;
   }
 
   async function loadReactions(msgs: any[]) {
@@ -646,12 +690,24 @@ export default function Chat() {
   async function sendMessage() {
     if (!newMessage || !activeContact) return;
 
-    const { error } = await supabase.from("messages").insert({
+    const insertPayload: any = {
       sender_id: userId,
       receiver_id: activeContact.id,
-      content: newMessage,
       reply_to_id: replyingTo ? replyingTo.id : null,
-    });
+    };
+
+    const sharedKey = await getSharedKeyForContact(activeContact.id);
+
+    if (sharedKey) {
+      const { ciphertext, iv } = await encryptText(sharedKey, newMessage);
+      insertPayload.encrypted_content = ciphertext;
+      insertPayload.iv = iv;
+      insertPayload.is_encrypted = true;
+    } else {
+      insertPayload.content = newMessage;
+    }
+
+    const { error } = await supabase.from("messages").insert(insertPayload);
 
     if (!error) {
       setNewMessage("");
@@ -844,7 +900,8 @@ export default function Chat() {
             </div>
             <div>
               <p className="font-semibold text-sm">{activeContact.first_name}</p>
-              <p className="text-xs text-zinc-400">
+              <p className="text-xs text-zinc-400 flex items-center gap-1">
+                {activeContact.public_key && <span title="End-to-end encrypted">🔒</span>}
                 {contactIsTyping
                   ? "typing…"
                   : isOnline(activeContact.last_active)
