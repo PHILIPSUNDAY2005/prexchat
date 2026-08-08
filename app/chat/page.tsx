@@ -86,6 +86,7 @@ const reactionEmojis = ["❤️", "😂", "😮", "😢", "🙏", "👍"];
 
 function getReplyPreview(replyMsg: any) {
   if (!replyMsg) return "";
+  if (replyMsg.deleted_for_everyone) return "🚫 This message was deleted";
   if (replyMsg.audio_url) return "🎤 Voice note";
   if (replyMsg.media_type === "video") return "🎥 Video";
   if (replyMsg.media_type === "image") return "📷 Photo";
@@ -118,6 +119,8 @@ export default function Chat() {
   const [myKeyPair, setMyKeyPair] = useState<CryptoKeyPair | null>(null);
   const [contactMenuFor, setContactMenuFor] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ type: "delete" | "clear" | "block"; contact: any } | null>(null);
+  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -135,6 +138,21 @@ export default function Chat() {
   const suppressClickRef = useRef<boolean>(false);
   const listLongPressRef = useRef<any>(null);
   const relationshipsRef = useRef<Record<string, any>>({});
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  function handleMessagesScroll() {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const near = distance < 120;
+    setIsNearBottom(near);
+    setShowScrollButton(!near);
+  }
+
+  function scrollToBottom(smooth = true) {
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  }
 
   useEffect(() => {
     async function getUser() {
@@ -241,6 +259,10 @@ export default function Chat() {
     contactsRef.current = contacts;
   }, [contacts]);
 
+  useEffect(() => {
+    if (isNearBottom) scrollToBottom(false);
+  }, [messages.length]);
+
   async function loadGroups(myId: string) {
     const { data } = await supabase
       .from("group_members")
@@ -283,7 +305,7 @@ export default function Chat() {
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for, is_encrypted, encrypted_content, iv")
+          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for, is_encrypted, encrypted_content, iv, deleted_for_everyone")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
@@ -299,26 +321,36 @@ export default function Chat() {
           .eq("receiver_id", myId)
           .eq("seen", false);
 
-        let previewText = visibleLastMsg?.content;
-        if (visibleLastMsg?.is_encrypted && visibleLastMsg?.encrypted_content && visibleLastMsg?.iv) {
-          const sharedKey = await getSharedKeyForContact(contact.id);
-          if (sharedKey) {
-            try {
-              previewText = await decryptText(sharedKey, visibleLastMsg.encrypted_content, visibleLastMsg.iv);
-            } catch {
-              previewText = "🔒 Unable to decrypt";
+        let preview = "Say hi 👋";
+
+        if (visibleLastMsg?.deleted_for_everyone) {
+          preview = "🚫 This message was deleted";
+        } else if (visibleLastMsg?.call_status === "missed") {
+          preview = `📵 Missed ${visibleLastMsg.call_type === "video" ? "video" : "voice"} call`;
+        } else if (visibleLastMsg?.audio_url) {
+          preview = "🎤 Voice note";
+        } else if (visibleLastMsg?.media_type === "video") {
+          preview = "🎥 Video";
+        } else if (visibleLastMsg?.media_type === "image") {
+          preview = "📷 Photo";
+        } else if (visibleLastMsg?.is_encrypted) {
+          if (visibleLastMsg?.encrypted_content && visibleLastMsg?.iv) {
+            const sharedKey = await getSharedKeyForContact(contact.id);
+            if (sharedKey) {
+              try {
+                preview = await decryptText(sharedKey, visibleLastMsg.encrypted_content, visibleLastMsg.iv);
+              } catch {
+                preview = "🔒 Unable to decrypt";
+              }
+            } else {
+              preview = "🔒 Encrypted message";
             }
           } else {
-            previewText = "🔒 Encrypted message";
+            preview = "🔒 Encrypted message";
           }
+        } else if (visibleLastMsg?.content) {
+          preview = visibleLastMsg.content;
         }
-
-        let preview = previewText || "Say hi 👋";
-        if (visibleLastMsg?.call_status === "missed") {
-          preview = `📵 Missed ${visibleLastMsg.call_type === "video" ? "video" : "voice"} call`;
-        } else if (visibleLastMsg?.audio_url) preview = "🎤 Voice note";
-        else if (visibleLastMsg?.media_type === "video") preview = "🎥 Video";
-        else if (visibleLastMsg?.media_type === "image") preview = "📷 Photo";
 
         const relationship = relMap[contact.id] || { muted: false, blocked: false, deleted_at: null };
 
@@ -438,7 +470,7 @@ export default function Chat() {
   async function fetchMessages(myId: string, contactId: string) {
     const { data } = await supabase
       .from("messages")
-      .select("*, reply_to:reply_to_id(id, content, encrypted_content, iv, is_encrypted, audio_url, media_url, media_type, sender_id)")
+      .select("*, reply_to:reply_to_id(id, content, encrypted_content, iv, is_encrypted, sender_id, deleted_for_everyone)")
       .or(
         `and(sender_id.eq.${myId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${myId})`
       )
@@ -449,6 +481,7 @@ export default function Chat() {
     const sharedKey = await getSharedKeyForContact(contactId);
 
     for (const m of all) {
+      if (m.deleted_for_everyone) continue;
       if (m.is_encrypted && m.encrypted_content && m.iv && sharedKey) {
         try {
           m.content = await decryptText(sharedKey, m.encrypted_content, m.iv);
@@ -456,7 +489,7 @@ export default function Chat() {
           m.content = "🔒 Unable to decrypt";
         }
       }
-      if (m.reply_to?.is_encrypted && m.reply_to.encrypted_content && m.reply_to.iv && sharedKey) {
+      if (m.reply_to && !m.reply_to.deleted_for_everyone && m.reply_to.is_encrypted && m.reply_to.encrypted_content && m.reply_to.iv && sharedKey) {
         try {
           m.reply_to.content = await decryptText(sharedKey, m.reply_to.encrypted_content, m.reply_to.iv);
         } catch {
@@ -523,6 +556,18 @@ export default function Chat() {
   function cancelSelectMode() {
     setSelectMode(false);
     setSelectedIds(new Set());
+  }
+
+  async function deleteForEveryone(msg: any) {
+    const { error } = await supabase.rpc("delete_message_for_everyone", { msg_id: msg.id });
+    if (error) {
+      alert("Could not delete: " + error.message);
+      return;
+    }
+    const fresh = await fetchMessages(userId, activeContact.id);
+    setMessages(fresh);
+    loadReactions(fresh);
+    loadContacts(userId);
   }
 
   async function deleteForMeSingle(msg: any) {
@@ -592,6 +637,8 @@ export default function Chat() {
     setContextMenuFor(null);
     setSelectMode(false);
     setSelectedIds(new Set());
+    setIsNearBottom(true);
+    setShowScrollButton(false);
 
     const initialMessages = await fetchMessages(userId, contact.id);
     setMessages(initialMessages);
@@ -633,6 +680,22 @@ export default function Chat() {
             if (newMsg.sender_id === contact.id) {
               supabase.from("messages").update({ seen: true }).eq("id", newMsg.id);
             }
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "messages" },
+        async (payload) => {
+          const updatedMsg = payload.new as any;
+          const isRelevant =
+            (updatedMsg.sender_id === userId && updatedMsg.receiver_id === contact.id) ||
+            (updatedMsg.sender_id === contact.id && updatedMsg.receiver_id === userId);
+
+          if (isRelevant) {
+            const fresh = await fetchMessages(userId, contact.id);
+            setMessages(fresh);
+            loadReactions(fresh);
           }
         }
       )
@@ -843,6 +906,7 @@ export default function Chat() {
     recorder.onstop = async () => {
       const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
       await uploadVoiceNote(audioBlob);
+      stream.getTracks().forEach((t) => t.stop());
     };
 
     recorder.start();
@@ -945,7 +1009,7 @@ export default function Chat() {
 
   if (activeContact) {
     return (
-      <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+      <div className="h-screen overflow-hidden bg-zinc-950 text-white flex flex-col">
         {viewingPhoto && (
           <div
             className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
@@ -967,15 +1031,19 @@ export default function Chat() {
             <div className="flex gap-8 mt-8">
               <button
                 onClick={declineIncomingCall}
-                className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-2xl"
+                className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center"
               >
-                📴
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="white" style={{ transform: "rotate(135deg)" }}>
+                  <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24 11.36 11.36 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1C10.61 21 3 13.39 3 4a1 1 0 011-1h3.49a1 1 0 011 1 11.36 11.36 0 00.57 3.57 1 1 0 01-.25 1.01l-2.2 2.21z" />
+                </svg>
               </button>
               <button
                 onClick={acceptIncomingCall}
-                className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center text-2xl"
+                className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center"
               >
-                📞
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="white">
+                  <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24 11.36 11.36 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1C10.61 21 3 13.39 3 4a1 1 0 011-1h3.49a1 1 0 011 1 11.36 11.36 0 00.57 3.57 1 1 0 01-.25 1.01l-2.2 2.21z" />
+                </svg>
               </button>
             </div>
           </div>
@@ -991,7 +1059,7 @@ export default function Chat() {
           />
         )}
 
-        <div className="bg-zinc-900 p-3 flex items-center justify-between">
+        <div className="bg-zinc-900 p-3 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-3">
             <button onClick={closeChat} className="text-white text-lg px-1">
               ←
@@ -1034,7 +1102,7 @@ export default function Chat() {
         </div>
 
         {activeContact.relationship?.blocked && (
-          <div className="bg-red-500/10 border-b border-red-500/30 px-4 py-2 flex items-center justify-between">
+          <div className="bg-red-500/10 border-b border-red-500/30 px-4 py-2 flex items-center justify-between flex-shrink-0">
             <span className="text-xs text-red-400">🚫 You blocked this contact</span>
             <button
               onClick={() => handleToggleBlock(activeContact)}
@@ -1046,7 +1114,7 @@ export default function Chat() {
         )}
 
         {selectMode && (
-          <div className="bg-zinc-900 border-b border-zinc-800 px-3 py-2 flex items-center justify-between">
+          <div className="bg-zinc-900 border-b border-zinc-800 px-3 py-2 flex items-center justify-between flex-shrink-0">
             <button onClick={cancelSelectMode} className="text-sm text-zinc-300">
               Cancel
             </button>
@@ -1062,7 +1130,9 @@ export default function Chat() {
         )}
 
         <div
-          className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto"
+          ref={messagesContainerRef}
+          onScroll={handleMessagesScroll}
+          className="flex-1 p-4 flex flex-col gap-2 overflow-y-auto relative min-h-0"
           style={
             myWallpaper
               ? {
@@ -1101,6 +1171,15 @@ export default function Chat() {
                   </div>
                 </div>
               </div>
+            ) : msg.deleted_for_everyone ? (
+              <div key={msg.id} className="flex items-center gap-2 w-full">
+                {selectMode && <div className="w-5 flex-shrink-0" />}
+                <div className={`flex-1 flex ${msg.sender_id === userId ? "justify-end" : "justify-start"}`}>
+                  <div className="max-w-[70%] p-2 px-3 rounded-2xl text-sm bg-zinc-800/40 text-zinc-500 italic">
+                    🚫 This message was deleted
+                  </div>
+                </div>
+              </div>
             ) : (
               <div key={msg.id} className="flex items-center gap-2 w-full">
                 {selectMode && (
@@ -1120,7 +1199,7 @@ export default function Chat() {
                   <div className="relative max-w-[70%] flex flex-col">
                     {contextMenuFor === msg.id && (
                       <div
-                        className={`absolute -top-2 z-50 bg-zinc-800 rounded-lg shadow-lg overflow-hidden text-sm w-44 ${
+                        className={`absolute -top-2 z-50 bg-zinc-800 rounded-lg shadow-lg overflow-hidden text-sm w-48 ${
                           msg.sender_id === userId ? "right-0" : "left-0"
                         }`}
                         style={{ transform: "translateY(-100%)" }}
@@ -1147,15 +1226,6 @@ export default function Chat() {
                         </button>
                         <button
                           onClick={() => {
-                            deleteForMeSingle(msg);
-                            setContextMenuFor(null);
-                          }}
-                          className="w-full text-left px-4 py-2 hover:bg-zinc-700 text-red-400"
-                        >
-                          🗑 Delete for me
-                        </button>
-                        <button
-                          onClick={() => {
                             setReactionPickerFor(msg.id);
                             setContextMenuFor(null);
                           }}
@@ -1163,6 +1233,26 @@ export default function Chat() {
                         >
                           ❤️ React
                         </button>
+                        <button
+                          onClick={() => {
+                            deleteForMeSingle(msg);
+                            setContextMenuFor(null);
+                          }}
+                          className="w-full text-left px-4 py-2 hover:bg-zinc-700 text-red-400"
+                        >
+                          🗑 Delete for me
+                        </button>
+                        {msg.sender_id === userId && (
+                          <button
+                            onClick={() => {
+                              deleteForEveryone(msg);
+                              setContextMenuFor(null);
+                            }}
+                            className="w-full text-left px-4 py-2 hover:bg-zinc-700 text-red-500 font-semibold"
+                          >
+                            🗑️ Delete for everyone
+                          </button>
+                        )}
                       </div>
                     )}
 
@@ -1267,10 +1357,21 @@ export default function Chat() {
               <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce" />
             </div>
           )}
+
+          {showScrollButton && (
+            <button
+              onClick={() => scrollToBottom(true)}
+              className="sticky bottom-2 self-center bg-zinc-800 border border-zinc-700 w-9 h-9 rounded-full flex items-center justify-center shadow-lg z-30"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
+                <path d="M12 4v16M12 20l-6-6M12 20l6-6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
         </div>
 
         {replyingTo && (
-          <div className="bg-zinc-800 border-t border-zinc-700 px-3 py-2 flex items-center gap-2">
+          <div className="bg-zinc-800 border-t border-zinc-700 px-3 py-2 flex items-center gap-2 flex-shrink-0">
             <div className="flex-1 border-l-4 border-blue-500 pl-2 min-w-0">
               <p className="text-xs font-semibold text-blue-400">
                 {replyingTo.sender_id === userId ? "You" : activeContact.first_name}
@@ -1283,7 +1384,7 @@ export default function Chat() {
           </div>
         )}
 
-        <div className="p-2 bg-zinc-900 flex items-center gap-2">
+        <div className="p-2 bg-zinc-900 flex items-center gap-2 flex-shrink-0">
           <input
             type="file"
             accept="image/*,video/*"
@@ -1332,13 +1433,22 @@ export default function Chat() {
                 isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
               } text-white`}
             >
-              🎤
+              {isRecording ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                  <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+                  <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
             </button>
           )}
         </div>
 
         {showEmojiPicker && (
-          <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2">
+          <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2 flex-shrink-0">
             {commonEmojis.map((emoji, i) => (
               <button
                 key={i}
