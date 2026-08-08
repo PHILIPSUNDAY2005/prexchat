@@ -5,6 +5,7 @@ import { supabase } from "../supabaseClient";
 import Link from "next/link";
 import CallScreen from "../CallScreen";
 import { getOrCreateKeyPair, exportPublicKeyBase64, importPublicKeyBase64, deriveSharedKey, encryptText, decryptText } from "../crypto";
+import { startRingtone, stopRingtone } from "../ringtone";
 
 function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -106,7 +107,7 @@ export default function Chat() {
   const [contactIsTyping, setContactIsTyping] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [myWallpaper, setMyWallpaper] = useState("");
-  const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string } | null>(null);
+  const [activeCall, setActiveCall] = useState<{ type: "audio" | "video"; channelName: string; status: "calling" | "ringing" | "connected" } | null>(null);
   const [incomingCall, setIncomingCall] = useState<{ type: "audio" | "video"; channelName: string; callerName: string } | null>(null);
   const [viewingPhoto, setViewingPhoto] = useState<string | null>(null);
   const [reactions, setReactions] = useState<Record<string, { emoji: string; user_id: string }[]>>({});
@@ -725,10 +726,26 @@ export default function Chat() {
             channelName: payload.payload.channelName,
             callerName: contact.first_name,
           });
+          startRingtone("incoming");
+        }
+      })
+      .on("broadcast", { event: "call-accepted" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          stopRingtone();
+          if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
+          setActiveCall((prev) => (prev ? { ...prev, status: "connected" } : prev));
+        }
+      })
+      .on("broadcast", { event: "call-declined" }, (payload) => {
+        if (payload.payload.senderId === contact.id) {
+          stopRingtone();
+          if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
+          setActiveCall(null);
         }
       })
       .on("broadcast", { event: "call-ended" }, (payload) => {
         if (payload.payload.senderId === contact.id) {
+          stopRingtone();
           if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
           setActiveCall(null);
           setIncomingCall(null);
@@ -807,6 +824,7 @@ export default function Chat() {
     if (activeContact.relationship?.blocked) return;
 
     const channelName = buildCallChannelName(userId, activeContact.id);
+    const recipientOnline = isOnline(activeContact.last_active);
 
     activeChannelRef.current.send({
       type: "broadcast",
@@ -814,10 +832,15 @@ export default function Chat() {
       payload: { senderId: userId, callType: type, channelName },
     });
 
-    setActiveCall({ type, channelName });
+    setActiveCall({ type, channelName, status: recipientOnline ? "ringing" : "calling" });
+
+    if (recipientOnline) {
+      startRingtone("outgoing");
+    }
 
     if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
     missedCallTimeoutRef.current = setTimeout(async () => {
+      stopRingtone();
       await supabase.from("messages").insert({
         sender_id: userId,
         receiver_id: activeContact.id,
@@ -839,16 +862,33 @@ export default function Chat() {
 
   function acceptIncomingCall() {
     if (!incomingCall) return;
+    stopRingtone();
     if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
-    setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName });
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: "broadcast",
+        event: "call-accepted",
+        payload: { senderId: userId },
+      });
+    }
+    setActiveCall({ type: incomingCall.type, channelName: incomingCall.channelName, status: "connected" });
     setIncomingCall(null);
   }
 
   function declineIncomingCall() {
+    stopRingtone();
+    if (activeChannelRef.current) {
+      activeChannelRef.current.send({
+        type: "broadcast",
+        event: "call-declined",
+        payload: { senderId: userId },
+      });
+    }
     setIncomingCall(null);
   }
 
   function endCall() {
+    stopRingtone();
     if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
     if (activeChannelRef.current) {
       activeChannelRef.current.send({
@@ -1002,6 +1042,11 @@ export default function Chat() {
         callType={activeCall.type}
         contactName={activeContact?.first_name || "Contact"}
         contactAvatar={activeContact?.avatar_url}
+        initialStatusText={activeCall.status === "ringing" ? "Ringing…" : "Calling…"}
+        onConnected={() => {
+          stopRingtone();
+          if (missedCallTimeoutRef.current) clearTimeout(missedCallTimeoutRef.current);
+        }}
         onEnd={endCall}
       />
     );
