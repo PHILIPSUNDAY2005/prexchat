@@ -183,11 +183,8 @@ export default function GroupChat() {
           placeholder="Type a message..."
           className="flex-1 p-2 rounded-lg text-sm outline-none text-black"
         />
-        <button
-          onClick={sendMessage}
-          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm"
-        >
-          Send
+        <button onClick={() => router.push(`/groupinfo/${groupId}`)} className="text-xs text-blue-400">
+          {members.length} members
         </button>
       </div>
     </div>
