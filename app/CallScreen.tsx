@@ -7,11 +7,13 @@ interface CallScreenProps {
   callType: "audio" | "video";
   contactName: string;
   contactAvatar?: string;
+  initialStatusText?: string;
+  onConnected: () => void;
   onEnd: () => void;
 }
 
-export default function CallScreen({ channelName, callType, contactName, contactAvatar, onEnd }: CallScreenProps) {
-  const [status, setStatus] = useState("Connecting…");
+export default function CallScreen({ channelName, callType, contactName, contactAvatar, initialStatusText, onConnected, onEnd }: CallScreenProps) {
+  const [status, setStatus] = useState(initialStatusText || "Connecting…");
   const [remoteJoined, setRemoteJoined] = useState(false);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
