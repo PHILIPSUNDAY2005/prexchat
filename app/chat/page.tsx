@@ -116,6 +116,8 @@ export default function Chat() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [myKeyPair, setMyKeyPair] = useState<CryptoKeyPair | null>(null);
+  const [contactMenuFor, setContactMenuFor] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ type: "delete" | "clear" | "block"; contact: any } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -131,6 +133,8 @@ export default function Chat() {
   const touchStartXRef = useRef<number>(0);
   const touchStartIdRef = useRef<string | null>(null);
   const suppressClickRef = useRef<boolean>(false);
+  const listLongPressRef = useRef<any>(null);
+  const relationshipsRef = useRef<Record<string, any>>({});
 
   useEffect(() => {
     async function getUser() {
@@ -184,7 +188,9 @@ export default function Chat() {
                 document.visibilityState === "visible" &&
                 activeContactRef.current?.id === newMsg.sender_id;
 
-              if (!isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
+              const isMuted = relationshipsRef.current[newMsg.sender_id]?.muted;
+
+              if (!isMuted && !isViewingThisChat && "Notification" in window && Notification.permission === "granted") {
                 const senderContact = contactsRef.current.find((c) => c.id === newMsg.sender_id);
                 const senderName = senderContact?.first_name || "New message";
                 const preview = newMsg.is_encrypted
@@ -262,11 +268,22 @@ export default function Chat() {
 
     const profiles = contactRows.map((row: any) => row.profiles);
 
+    const { data: relRows } = await supabase
+      .from("chat_relationships")
+      .select("contact_id, muted, blocked, deleted_at")
+      .eq("user_id", myId);
+
+    const relMap: Record<string, any> = {};
+    (relRows || []).forEach((r: any) => {
+      relMap[r.contact_id] = r;
+    });
+    relationshipsRef.current = relMap;
+
     const contactsWithLastMessage = await Promise.all(
       profiles.map(async (contact: any) => {
         const { data: lastMsg } = await supabase
           .from("messages")
-          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for, is_encrypted")
+          .select("content, audio_url, media_url, media_type, call_type, call_status, created_at, hidden_for, is_encrypted, encrypted_content, iv")
           .or(
             `and(sender_id.eq.${myId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${myId})`
           )
@@ -282,25 +299,117 @@ export default function Chat() {
           .eq("receiver_id", myId)
           .eq("seen", false);
 
-        let preview = visibleLastMsg?.content || "Say hi 👋";
-        if (visibleLastMsg?.is_encrypted) {
-          preview = "🔒 Encrypted message";
-        } else if (visibleLastMsg?.call_status === "missed") {
+        let previewText = visibleLastMsg?.content;
+        if (visibleLastMsg?.is_encrypted && visibleLastMsg?.encrypted_content && visibleLastMsg?.iv) {
+          const sharedKey = await getSharedKeyForContact(contact.id);
+          if (sharedKey) {
+            try {
+              previewText = await decryptText(sharedKey, visibleLastMsg.encrypted_content, visibleLastMsg.iv);
+            } catch {
+              previewText = "🔒 Unable to decrypt";
+            }
+          } else {
+            previewText = "🔒 Encrypted message";
+          }
+        }
+
+        let preview = previewText || "Say hi 👋";
+        if (visibleLastMsg?.call_status === "missed") {
           preview = `📵 Missed ${visibleLastMsg.call_type === "video" ? "video" : "voice"} call`;
         } else if (visibleLastMsg?.audio_url) preview = "🎤 Voice note";
         else if (visibleLastMsg?.media_type === "video") preview = "🎥 Video";
         else if (visibleLastMsg?.media_type === "image") preview = "📷 Photo";
 
+        const relationship = relMap[contact.id] || { muted: false, blocked: false, deleted_at: null };
+
         return {
           ...contact,
           lastMessage: preview,
           lastTime: visibleLastMsg?.created_at || null,
+          lastCreatedAt: visibleLastMsg?.created_at || null,
           unreadCount: unreadCount || 0,
+          relationship,
         };
       })
     );
 
-    setContacts(contactsWithLastMessage);
+    const visible = contactsWithLastMessage.filter((c) => {
+      if (!c.relationship.deleted_at) return true;
+      if (!c.lastCreatedAt) return false;
+      return new Date(c.lastCreatedAt) > new Date(c.relationship.deleted_at);
+    });
+
+    setContacts(visible);
+  }
+
+  async function upsertRelationship(contactId: string, updates: any) {
+    const current = relationshipsRef.current[contactId] || { muted: false, blocked: false, deleted_at: null };
+    const merged = { ...current, ...updates };
+
+    await supabase
+      .from("chat_relationships")
+      .upsert(
+        { user_id: userId, contact_id: contactId, muted: merged.muted, blocked: merged.blocked, deleted_at: merged.deleted_at },
+        { onConflict: "user_id,contact_id" }
+      );
+
+    relationshipsRef.current[contactId] = merged;
+    loadContacts(userId);
+  }
+
+  async function handleDeleteConversation(contact: any) {
+    await upsertRelationship(contact.id, { deleted_at: new Date().toISOString() });
+    setConfirmAction(null);
+    setContactMenuFor(null);
+  }
+
+  async function handleClearChat(contact: any) {
+    const { data } = await supabase
+      .from("messages")
+      .select("id, hidden_for")
+      .or(`and(sender_id.eq.${userId},receiver_id.eq.${contact.id}),and(sender_id.eq.${contact.id},receiver_id.eq.${userId})`);
+
+    if (data) {
+      for (const m of data) {
+        if (!(m.hidden_for || []).includes(userId)) {
+          const newHidden = [...(m.hidden_for || []), userId];
+          await supabase.from("messages").update({ hidden_for: newHidden }).eq("id", m.id);
+        }
+      }
+    }
+
+    if (activeContact?.id === contact.id) {
+      const fresh = await fetchMessages(userId, contact.id);
+      setMessages(fresh);
+      loadReactions(fresh);
+    }
+
+    loadContacts(userId);
+    setConfirmAction(null);
+    setContactMenuFor(null);
+  }
+
+  async function handleToggleBlock(contact: any) {
+    const current = relationshipsRef.current[contact.id] || { blocked: false };
+    await upsertRelationship(contact.id, { blocked: !current.blocked });
+    setConfirmAction(null);
+    setContactMenuFor(null);
+  }
+
+  async function handleToggleMute(contact: any) {
+    const current = relationshipsRef.current[contact.id] || { muted: false };
+    await upsertRelationship(contact.id, { muted: !current.muted });
+    setContactMenuFor(null);
+  }
+
+  function startListLongPress(contactId: string) {
+    listLongPressRef.current = setTimeout(() => {
+      setContactMenuFor(contactId);
+    }, 500);
+  }
+
+  function cancelListLongPress() {
+    if (listLongPressRef.current) clearTimeout(listLongPressRef.current);
   }
 
   function formatTime(timestamp: string | null) {
@@ -632,6 +741,7 @@ export default function Chat() {
 
   function startCall(type: "audio" | "video") {
     if (!activeContact || !activeChannelRef.current) return;
+    if (activeContact.relationship?.blocked) return;
 
     const channelName = buildCallChannelName(userId, activeContact.id);
 
@@ -689,6 +799,7 @@ export default function Chat() {
 
   async function sendMessage() {
     if (!newMessage || !activeContact) return;
+    if (activeContact.relationship?.blocked) return;
 
     const insertPayload: any = {
       sender_id: userId,
@@ -745,6 +856,7 @@ export default function Chat() {
 
   async function uploadVoiceNote(audioBlob: Blob) {
     if (!activeContact) return;
+    if (activeContact.relationship?.blocked) return;
 
     const fileName = `${userId}-${Date.now()}.webm`;
 
@@ -807,6 +919,7 @@ export default function Chat() {
   }
 
   async function uploadMultipleMedia(files: FileList) {
+    if (!activeContact || activeContact.relationship?.blocked) return;
     const replyId = replyingTo ? replyingTo.id : null;
     for (const file of Array.from(files)) {
       await uploadOneMedia(file, replyId);
@@ -911,10 +1024,26 @@ export default function Chat() {
             </div>
           </div>
           <div className="flex items-center gap-4 text-lg pr-1">
-            <button onClick={() => startCall("video")} title="Video call">🎥</button>
-            <button onClick={() => startCall("audio")} title="Voice call">📞</button>
+            {!activeContact.relationship?.blocked && (
+              <>
+                <button onClick={() => startCall("video")} title="Video call">🎥</button>
+                <button onClick={() => startCall("audio")} title="Voice call">📞</button>
+              </>
+            )}
           </div>
         </div>
+
+        {activeContact.relationship?.blocked && (
+          <div className="bg-red-500/10 border-b border-red-500/30 px-4 py-2 flex items-center justify-between">
+            <span className="text-xs text-red-400">🚫 You blocked this contact</span>
+            <button
+              onClick={() => handleToggleBlock(activeContact)}
+              className="text-xs text-blue-400"
+            >
+              Unblock
+            </button>
+          </div>
+        )}
 
         {selectMode && (
           <div className="bg-zinc-900 border-b border-zinc-800 px-3 py-2 flex items-center justify-between">
@@ -1184,8 +1313,9 @@ export default function Chat() {
             type="text"
             value={newMessage}
             onChange={(e) => handleTyping(e.target.value)}
-            placeholder="Message"
-            className="flex-1 p-3 rounded-full text-sm outline-none bg-zinc-800 text-white"
+            placeholder={activeContact.relationship?.blocked ? "You blocked this contact" : "Message"}
+            disabled={activeContact.relationship?.blocked}
+            className="flex-1 p-3 rounded-full text-sm outline-none bg-zinc-800 text-white disabled:opacity-50"
           />
 
           {newMessage ? (
@@ -1293,7 +1423,16 @@ export default function Chat() {
           <div
             key={contact.id}
             onClick={() => openChat(contact)}
-            className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 hover:bg-zinc-900 cursor-pointer"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContactMenuFor(contact.id);
+            }}
+            onMouseDown={() => startListLongPress(contact.id)}
+            onMouseUp={cancelListLongPress}
+            onMouseLeave={cancelListLongPress}
+            onTouchStart={() => startListLongPress(contact.id)}
+            onTouchEnd={cancelListLongPress}
+            className="relative flex items-center justify-between px-4 py-3 border-b border-zinc-800 hover:bg-zinc-900 cursor-pointer select-none"
           >
             <div className="flex items-center gap-3">
               <div className="relative flex-shrink-0">
@@ -1309,7 +1448,11 @@ export default function Chat() {
                 )}
               </div>
               <div>
-                <p className="text-sm font-semibold">{contact.first_name}</p>
+                <p className="text-sm font-semibold flex items-center gap-1">
+                  {contact.first_name}
+                  {contact.relationship?.muted && <span className="text-xs">🔕</span>}
+                  {contact.relationship?.blocked && <span className="text-xs">🚫</span>}
+                </p>
                 <p className="text-xs text-zinc-400 truncate max-w-[200px]">
                   {contact.lastMessage}
                 </p>
@@ -1325,8 +1468,90 @@ export default function Chat() {
                 </span>
               )}
             </div>
+
+            {contactMenuFor === contact.id && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setContactMenuFor(null);
+                  }}
+                />
+                <div
+                  className="absolute right-4 top-full mt-1 z-50 bg-zinc-800 rounded-lg shadow-lg overflow-hidden text-sm w-44"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <button
+                    onClick={() => setConfirmAction({ type: "delete", contact })}
+                    className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                  >
+                    🗑️ Delete
+                  </button>
+                  <button
+                    onClick={() => setConfirmAction({ type: "block", contact })}
+                    className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                  >
+                    {contact.relationship?.blocked ? "✅ Unblock" : "🚫 Block"}
+                  </button>
+                  <button
+                    onClick={() => setConfirmAction({ type: "clear", contact })}
+                    className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                  >
+                    🧹 Clear chat
+                  </button>
+                  <button
+                    onClick={() => handleToggleMute(contact)}
+                    className="w-full text-left px-4 py-2 hover:bg-zinc-700"
+                  >
+                    {contact.relationship?.muted ? "🔔 Unmute" : "🔕 Mute"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         ))}
+
+        {confirmAction && (
+          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center px-6">
+            <div className="bg-zinc-900 rounded-xl p-5 w-full max-w-sm">
+              <h3 className="font-semibold text-white mb-2">
+                {confirmAction.type === "delete" && "Delete conversation?"}
+                {confirmAction.type === "clear" && "Clear chat?"}
+                {confirmAction.type === "block" &&
+                  (confirmAction.contact.relationship?.blocked ? "Unblock this user?" : "Block this user?")}
+              </h3>
+              <p className="text-sm text-zinc-400 mb-4">
+                {confirmAction.type === "delete" &&
+                  "This removes the conversation from your chat list. It won't affect the other person's chats."}
+                {confirmAction.type === "clear" &&
+                  "This removes the messages from this conversation on your side only. The other person will still see them."}
+                {confirmAction.type === "block" &&
+                  (confirmAction.contact.relationship?.blocked
+                    ? "They'll be able to message and call you again."
+                    : "They won't be able to send you messages or calls. This won't affect your other conversations.")}
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setConfirmAction(null)}
+                  className="px-4 py-2 text-sm text-zinc-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirmAction.type === "delete") handleDeleteConversation(confirmAction.contact);
+                    if (confirmAction.type === "clear") handleClearChat(confirmAction.contact);
+                    if (confirmAction.type === "block") handleToggleBlock(confirmAction.contact);
+                  }}
+                  className="px-4 py-2 text-sm bg-red-500 hover:bg-red-600 rounded-lg text-white"
+                >
+                  {confirmAction.type === "block" && confirmAction.contact.relationship?.blocked ? "Unblock" : "Confirm"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="fixed bottom-0 left-0 right-0 bg-zinc-900 border-t border-zinc-800 flex justify-around py-2">
