@@ -122,6 +122,9 @@ export default function Chat() {
   const [confirmAction, setConfirmAction] = useState<{ type: "delete" | "clear" | "block"; contact: any } | null>(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearchingMessages, setIsSearchingMessages] = useState(false);
+  const [listFilter, setListFilter] = useState<"all" | "unread" | "groups">("all");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -140,6 +143,7 @@ export default function Chat() {
   const listLongPressRef = useRef<any>(null);
   const relationshipsRef = useRef<Record<string, any>>({});
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const searchDebounceRef = useRef<any>(null);
 
   function handleMessagesScroll() {
     const el = messagesContainerRef.current;
@@ -466,6 +470,59 @@ export default function Chat() {
     } catch {
       return null;
     }
+  }
+
+  async function searchMessages(term: string) {
+    if (term.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearchingMessages(true);
+
+    const { data } = await supabase
+      .from("messages")
+      .select("id, sender_id, receiver_id, content, encrypted_content, iv, is_encrypted, deleted_for_everyone, hidden_for, created_at")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+      .eq("deleted_for_everyone", false)
+      .order("created_at", { ascending: false })
+      .limit(300);
+
+    const visible = (data || []).filter((m: any) => !(m.hidden_for || []).includes(userId));
+
+    const byContact: Record<string, any[]> = {};
+    visible.forEach((m: any) => {
+      const otherId = m.sender_id === userId ? m.receiver_id : m.sender_id;
+      if (!byContact[otherId]) byContact[otherId] = [];
+      byContact[otherId].push(m);
+    });
+
+    const lowerTerm = term.toLowerCase();
+    const matches: any[] = [];
+
+    for (const contactId of Object.keys(byContact)) {
+      const contact = contacts.find((c) => c.id === contactId);
+      if (!contact) continue;
+
+      const sharedKey = await getSharedKeyForContact(contactId);
+
+      for (const m of byContact[contactId]) {
+        let text = m.content;
+        if (m.is_encrypted && m.encrypted_content && m.iv && sharedKey) {
+          try {
+            text = await decryptText(sharedKey, m.encrypted_content, m.iv);
+          } catch {
+            continue;
+          }
+        }
+        if (text && text.toLowerCase().includes(lowerTerm)) {
+          matches.push({ ...m, decryptedText: text, contact });
+        }
+      }
+    }
+
+    setSearchResults(matches);
+    setIsSearchingMessages(false);
   }
 
   async function fetchMessages(myId: string, contactId: string) {
@@ -1512,9 +1569,15 @@ export default function Chat() {
     );
   }
 
-  const filteredContacts = contacts.filter((c) =>
-    c.first_name?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredContacts = contacts
+    .filter((c) => c.first_name?.toLowerCase().includes(search.toLowerCase()))
+    .filter((c) => {
+      if (listFilter === "unread") return c.unreadCount > 0;
+      if (listFilter === "groups") return false;
+      return true;
+    });
+
+  const filteredGroups = listFilter === "unread" ? [] : groups;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white pb-16">
@@ -1540,16 +1603,71 @@ export default function Chat() {
         <input
           type="text"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search chats"
+          onChange={(e) => {
+            const value = e.target.value;
+            setSearch(value);
+            if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+            searchDebounceRef.current = setTimeout(() => searchMessages(value), 400);
+          }}
+          placeholder="Search chats and messages"
           className="w-full p-2 rounded-lg text-sm outline-none bg-zinc-800 text-white"
         />
       </div>
 
-      {groups.length > 0 && (
+      {search.trim().length < 2 && (
+        <div className="flex gap-2 px-3 pb-2">
+          {(["all", "unread", "groups"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setListFilter(f)}
+              className={`px-3 py-1 rounded-full text-xs font-medium ${
+                listFilter === f ? "bg-green-600 text-white" : "bg-zinc-800 text-zinc-300"
+              }`}
+            >
+              {f === "all" ? "All" : f === "unread" ? "Unread" : "Groups"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {search.trim().length >= 2 && (
+        <div>
+          <p className="text-xs text-zinc-500 px-4 pt-2 pb-1">
+            {isSearchingMessages ? "Searching messages…" : `Messages (${searchResults.length})`}
+          </p>
+          {searchResults.map((m) => (
+            <div
+              key={m.id}
+              onClick={() => {
+                setSearch("");
+                setSearchResults([]);
+                openChat(m.contact);
+              }}
+              className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800 hover:bg-zinc-900 cursor-pointer"
+            >
+              <div className="w-11 h-11 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold flex-shrink-0">
+                {m.contact.avatar_url ? (
+                  <img src={m.contact.avatar_url} className="w-full h-full object-cover" />
+                ) : (
+                  m.contact.first_name?.charAt(0)
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">{m.contact.first_name}</p>
+                <p className="text-xs text-zinc-400 truncate">{m.decryptedText}</p>
+              </div>
+            </div>
+          ))}
+          {!isSearchingMessages && searchResults.length === 0 && (
+            <p className="text-zinc-500 text-sm px-4 pb-2">No messages found.</p>
+          )}
+        </div>
+      )}
+
+      {filteredGroups.length > 0 && search.trim().length < 2 && (
         <div>
           <p className="text-xs text-zinc-500 px-4 pt-2 pb-1">Groups</p>
-          {groups.map((group) => (
+          {filteredGroups.map((group) => (
             <Link
               key={group.id}
               href={`/groupchat/${group.id}`}
@@ -1564,8 +1682,8 @@ export default function Chat() {
         </div>
       )}
 
-      <div>
-        {groups.length > 0 && (
+      <div className={search.trim().length >= 2 || listFilter === "groups" ? "hidden" : ""}>
+        {filteredGroups.length > 0 && (
           <p className="text-xs text-zinc-500 px-4 pt-3 pb-1">Chats</p>
         )}
         {filteredContacts.length === 0 && (
