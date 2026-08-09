@@ -309,10 +309,23 @@ export default function GroupInfo() {
           )}
         </div>
 
-        {message && <p className="text-xs text-red-400 mt-2">{message}</p>}
+       {message && <p className="text-xs text-red-400 mt-2">{message}</p>}
+
+        <div className="flex justify-center gap-8 mt-6">
+          {isAdmin && (
+            <button onClick={openAddMembers} className="flex flex-col items-center gap-1">
+              <span className="w-11 h-11 rounded-full bg-zinc-800 flex items-center justify-center text-lg">➕</span>
+              <span className="text-xs text-zinc-400">Add</span>
+            </button>
+          )}
+          <a href="#members-section" className="flex flex-col items-center gap-1">
+            <span className="w-11 h-11 rounded-full bg-zinc-800 flex items-center justify-center text-lg">👥</span>
+            <span className="text-xs text-zinc-400">Members</span>
+          </a>
+        </div>
       </div>
 
-      <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+      <div id="members-section" className="px-4 pt-6 pb-2 flex items-center justify-between">
         <p className="text-sm font-semibold text-zinc-300">{members.length} Members</p>
         {isAdmin && (
           <button onClick={openAddMembers} className="text-sm text-blue-400">
