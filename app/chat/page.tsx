@@ -990,31 +990,79 @@ export default function Chat() {
     }
   }
 
-  async function startRecording() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const recorder = new MediaRecorder(stream);
+ async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+    });
+
+    let mimeType = "";
+
+    if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+      mimeType = "audio/webm;codecs=opus";
+    } else if (MediaRecorder.isTypeSupported("audio/webm")) {
+      mimeType = "audio/webm";
+    } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
+      mimeType = "audio/mp4";
+    }
+
+    const recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+
     mediaRecorderRef.current = recorder;
     audioChunksRef.current = [];
 
     recorder.ondataavailable = (e) => {
-      audioChunksRef.current.push(e.data);
+      if (e.data && e.data.size > 0) {
+        audioChunksRef.current.push(e.data);
+      }
     };
 
     recorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-      await uploadVoiceNote(audioBlob);
-      stream.getTracks().forEach((t) => t.stop());
+      try {
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+
+        if (audioBlob.size === 0) {
+          console.error("Voice note is empty.");
+          return;
+        }
+
+        await uploadVoiceNote(audioBlob);
+      } catch (error) {
+        console.error("Voice note upload failed:", error);
+      } finally {
+        stream.getTracks().forEach((track) => track.stop());
+        mediaRecorderRef.current = null;
+        audioChunksRef.current = [];
+        setIsRecording(false);
+      }
     };
 
-    recorder.start();
-    setIsRecording(true);
-  }
+    recorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event);
 
-  function stopRecording() {
-    mediaRecorderRef.current?.stop();
+      stream.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+      setIsRecording(false);
+    };
+
+    recorder.start(250);
+    setIsRecording(true);
+  } catch (error) {
+    console.error("Microphone access failed:", error);
     setIsRecording(false);
   }
+}
+function stopRecording() {
+  const recorder = mediaRecorderRef.current;
 
+  if (recorder && recorder.state !== "inactive") {
+    recorder.stop();
+  }
+}
   async function uploadVoiceNote(audioBlob: Blob) {
     if (!activeContact) return;
     if (activeContact.relationship?.blocked) return;
