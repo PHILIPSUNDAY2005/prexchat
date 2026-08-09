@@ -12,8 +12,49 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [bars, setBars] = useState<number[]>([8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]);
 
-  const bars = [6, 12, 18, 10, 14, 20, 9, 16, 22, 8, 13, 19, 7, 15, 21, 11, 17, 9, 14, 6];
+  useEffect(() => {
+    let cancelled = false;
+
+    async function buildWaveform() {
+      try {
+        const res = await fetch(src);
+        const arrayBuffer = await res.arrayBuffer();
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioCtx();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        const rawData = audioBuffer.getChannelData(0);
+
+        const barCount = 20;
+        const blockSize = Math.floor(rawData.length / barCount);
+        const peaks: number[] = [];
+
+        for (let i = 0; i < barCount; i++) {
+          let sum = 0;
+          for (let j = 0; j < blockSize; j++) {
+            sum += Math.abs(rawData[i * blockSize + j] || 0);
+          }
+          peaks.push(sum / blockSize);
+        }
+
+        const max = Math.max(...peaks, 0.001);
+        const scaled = peaks.map((p) => 5 + (p / max) * 17);
+
+        if (!cancelled) setBars(scaled);
+        ctx.close();
+      } catch {
+        // Some browsers/codecs can't decode this file for waveform analysis —
+        // fall back to the flat placeholder bars already set above rather
+        // than blocking playback.
+      }
+    }
+
+    buildWaveform();
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
 
   function formatDuration(seconds: number) {
     if (!seconds || isNaN(seconds)) return "0:00";
@@ -27,7 +68,7 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
     if (isPlaying) {
       audioRef.current.pause();
     } else {
-      audioRef.current.play();
+      audioRef.current.play().catch(() => {});
     }
   }
 
@@ -44,6 +85,7 @@ function VoiceNotePlayer({ src, isMine }: { src: string; isMine: boolean }) {
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={() => setIsPlaying(false)}
+        onError={() => setIsPlaying(false)}
       />
       <button
         onClick={togglePlay}
@@ -125,9 +167,19 @@ export default function Chat() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearchingMessages, setIsSearchingMessages] = useState(false);
   const [listFilter, setListFilter] = useState<"all" | "unread" | "groups">("all");
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [liveWaveform, setLiveWaveform] = useState<number[]>(new Array(24).fill(4));
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [recordingError, setRecordingError] = useState("");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRecRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const waveformFrameRef = useRef<number | null>(null);
+  const recordingTimerRef = useRef<any>(null);
   const activeChannelRef = useRef<any>(null);
   const pollIntervalRef = useRef<any>(null);
   const typingTimeoutRef = useRef<any>(null);
@@ -990,82 +1042,131 @@ export default function Chat() {
     }
   }
 
- async function startRecording() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-    });
+  function runWaveformLoop() {
+    if (!analyserRef.current) return;
+    const analyser = analyserRef.current;
+    const data = new Uint8Array(analyser.frequencyBinCount);
 
-    let mimeType = "";
+    function tick() {
+      if (!analyserRef.current) return;
+      analyser.getByteTimeDomainData(data);
 
-    if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
-      mimeType = "audio/webm;codecs=opus";
-    } else if (MediaRecorder.isTypeSupported("audio/webm")) {
-      mimeType = "audio/webm";
-    } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
-      mimeType = "audio/mp4";
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / data.length);
+      const barHeight = Math.min(4 + rms * 60, 26);
+
+      setLiveWaveform((prev) => [...prev.slice(1), barHeight]);
+      waveformFrameRef.current = requestAnimationFrame(tick);
     }
 
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType })
-      : new MediaRecorder(stream);
+    tick();
+  }
 
+  function stopWaveformLoop() {
+    if (waveformFrameRef.current) {
+      cancelAnimationFrame(waveformFrameRef.current);
+      waveformFrameRef.current = null;
+    }
+    if (audioContextRecRef.current) {
+      audioContextRecRef.current.close().catch(() => {});
+      audioContextRecRef.current = null;
+    }
+    analyserRef.current = null;
+  }
+
+  async function startRecording() {
+    setRecordingError("");
+
+    if (typeof MediaRecorder === "undefined") {
+      setRecordingError("Voice recording isn't supported on this browser.");
+      return;
+    }
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setRecordingError("Microphone access was denied or unavailable.");
+      return;
+    }
+
+    mediaStreamRef.current = stream;
+
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioCtx();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      audioContextRecRef.current = audioCtx;
+      analyserRef.current = analyser;
+      runWaveformLoop();
+    } catch {
+      // Live waveform is a visual nicety — if it fails to set up, recording
+      // still proceeds without it.
+    }
+
+    const recorder = new MediaRecorder(stream);
     mediaRecorderRef.current = recorder;
     audioChunksRef.current = [];
 
     recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) {
-        audioChunksRef.current.push(e.data);
-      }
+      audioChunksRef.current.push(e.data);
     };
 
-    recorder.onstop = async () => {
-      try {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        });
+    recorder.onstop = () => {
+      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      setPreviewBlob(audioBlob);
+      setPreviewUrl(URL.createObjectURL(audioBlob));
 
-        if (audioBlob.size === 0) {
-          console.error("Voice note is empty.");
-          return;
-        }
-
-        await uploadVoiceNote(audioBlob);
-      } catch (error) {
-        console.error("Voice note upload failed:", error);
-      } finally {
-        stream.getTracks().forEach((track) => track.stop());
-        mediaRecorderRef.current = null;
-        audioChunksRef.current = [];
-        setIsRecording(false);
-      }
+      stopWaveformLoop();
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
     };
 
-    recorder.onerror = (event) => {
-      console.error("MediaRecorder error:", event);
-
-      stream.getTracks().forEach((track) => track.stop());
-      mediaRecorderRef.current = null;
-      setIsRecording(false);
-    };
-
-    recorder.start(250);
+    recorder.start();
     setIsRecording(true);
-  } catch (error) {
-    console.error("Microphone access failed:", error);
+    setRecordingSeconds(0);
+    setLiveWaveform(new Array(24).fill(4));
+
+    recordingTimerRef.current = setInterval(() => {
+      setRecordingSeconds((s) => s + 1);
+    }, 1000);
+  }
+
+  function stopRecording() {
+    mediaRecorderRef.current?.stop();
     setIsRecording(false);
   }
-}
-function stopRecording() {
-  const recorder = mediaRecorderRef.current;
 
-  if (recorder && recorder.state !== "inactive") {
-    recorder.stop();
+  function cancelRecording() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.onstop = null;
+      mediaRecorderRef.current.stop();
+    }
+    stopWaveformLoop();
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewBlob(null);
+    setPreviewUrl(null);
+    setIsRecording(false);
+    setRecordingSeconds(0);
   }
-}
+
   async function uploadVoiceNote(audioBlob: Blob) {
     if (!activeContact) return;
     if (activeContact.relationship?.blocked) return;
+
+    setRecordingError("");
 
     const fileName = `${userId}-${Date.now()}.webm`;
 
@@ -1074,7 +1175,7 @@ function stopRecording() {
       .upload(fileName, audioBlob);
 
     if (uploadError) {
-      alert("Upload failed: " + uploadError.message);
+      setRecordingError("Upload failed: " + uploadError.message);
       return;
     }
 
@@ -1089,13 +1190,27 @@ function stopRecording() {
       reply_to_id: replyingTo ? replyingTo.id : null,
     });
 
-    if (!error) {
-      setReplyingTo(null);
-      const fresh = await fetchMessages(userId, activeContact.id);
-      setMessages(fresh);
-      loadReactions(fresh);
-      loadContacts(userId);
+    if (error) {
+      setRecordingError("Could not send voice note: " + error.message);
+      return;
     }
+
+    setReplyingTo(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewBlob(null);
+    setPreviewUrl(null);
+    setRecordingSeconds(0);
+
+    const fresh = await fetchMessages(userId, activeContact.id);
+    setMessages(fresh);
+    loadReactions(fresh);
+    loadContacts(userId);
+  }
+
+  function formatRecordingTime(total: number) {
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
   }
 
   async function uploadOneMedia(file: File, replyId: string | null) {
@@ -1534,68 +1649,112 @@ function stopRecording() {
           </div>
         )}
 
-        <div className="p-2 bg-zinc-900 flex items-center gap-2 flex-shrink-0">
-          <input
-            type="file"
-            accept="image/*,video/*"
-            multiple
-            className="hidden"
-            id="media-input"
-            onChange={(e) => {
-              if (e.target.files && e.target.files.length > 0) {
-                uploadMultipleMedia(e.target.files);
-              }
-              e.target.value = "";
-            }}
-          />
-          <label
-            htmlFor="media-input"
-            className="text-xl cursor-pointer w-10 h-10 flex items-center justify-center flex-shrink-0"
-          >
-            📎
-          </label>
-          <button
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="text-xl w-10 h-10 flex items-center justify-center flex-shrink-0"
-          >
-            😊
-          </button>
-          <input
-            type="text"
-            value={newMessage}
-            onChange={(e) => handleTyping(e.target.value)}
-            placeholder={activeContact.relationship?.blocked ? "You blocked this contact" : "Message"}
-            disabled={activeContact.relationship?.blocked}
-            className="flex-1 p-3 rounded-full text-sm outline-none bg-zinc-800 text-white disabled:opacity-50"
-          />
+        {recordingError && (
+          <div className="bg-red-500/10 border-t border-red-500/30 px-4 py-2 flex-shrink-0">
+            <p className="text-xs text-red-400">{recordingError}</p>
+          </div>
+        )}
 
-          {newMessage ? (
+        {isRecording ? (
+          <div className="p-2 bg-zinc-900 flex items-center gap-3 flex-shrink-0">
             <button
-              onClick={sendMessage}
+              onClick={cancelRecording}
+              className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 text-red-400 text-xl"
+            >
+              ✕
+            </button>
+            <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+            <span className="text-sm text-zinc-300 flex-shrink-0 w-10">
+              {formatRecordingTime(recordingSeconds)}
+            </span>
+            <div className="flex-1 flex items-end gap-[2px] h-6 overflow-hidden">
+              {liveWaveform.map((h, i) => (
+                <div key={i} className="w-[3px] bg-blue-400 rounded-full flex-shrink-0" style={{ height: `${h}px` }} />
+              ))}
+            </div>
+            <button
+              onClick={stopRecording}
+              className="bg-blue-500 hover:bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          </div>
+        ) : previewUrl ? (
+          <div className="p-2 bg-zinc-900 flex items-center gap-3 flex-shrink-0">
+            <button
+              onClick={cancelRecording}
+              className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 text-red-400 text-xl"
+            >
+              🗑
+            </button>
+            <div className="flex-1 bg-zinc-800 rounded-full px-3 py-2">
+              <audio controls src={previewUrl} className="w-full h-8" />
+            </div>
+            <button
+              onClick={() => previewBlob && uploadVoiceNote(previewBlob)}
               className="bg-blue-500 hover:bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
             >
               ➤
             </button>
-          ) : (
-            <button
-              onClick={isRecording ? stopRecording : startRecording}
-              className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
-                isRecording ? "bg-red-500" : "bg-blue-500 hover:bg-blue-600"
-              } text-white`}
+          </div>
+        ) : (
+          <div className="p-2 bg-zinc-900 flex items-center gap-2 flex-shrink-0">
+            <input
+              type="file"
+              accept="image/*,video/*"
+              multiple
+              className="hidden"
+              id="media-input"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  uploadMultipleMedia(e.target.files);
+                }
+                e.target.value = "";
+              }}
+            />
+            <label
+              htmlFor="media-input"
+              className="text-xl cursor-pointer w-10 h-10 flex items-center justify-center flex-shrink-0"
             >
-              {isRecording ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
-                  <rect x="6" y="6" width="12" height="12" rx="2" />
-                </svg>
-              ) : (
+              📎
+            </label>
+            <button
+              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+              className="text-xl w-10 h-10 flex items-center justify-center flex-shrink-0"
+            >
+              😊
+            </button>
+            <input
+              type="text"
+              value={newMessage}
+              onChange={(e) => handleTyping(e.target.value)}
+              placeholder={activeContact.relationship?.blocked ? "You blocked this contact" : "Message"}
+              disabled={activeContact.relationship?.blocked}
+              className="flex-1 p-3 rounded-full text-sm outline-none bg-zinc-800 text-white disabled:opacity-50"
+            />
+
+            {newMessage ? (
+              <button
+                onClick={sendMessage}
+                className="bg-blue-500 hover:bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
+              >
+                ➤
+              </button>
+            ) : (
+              <button
+                onClick={startRecording}
+                className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-500 hover:bg-blue-600 text-white"
+              >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
                   <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
                   <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-              )}
-            </button>
-          )}
-        </div>
+              </button>
+            )}
+          </div>
+        )}
 
         {showEmojiPicker && (
           <div className="bg-zinc-900 border-t border-zinc-800 p-3 grid grid-cols-8 gap-2 flex-shrink-0">
