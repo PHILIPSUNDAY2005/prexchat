@@ -8,17 +8,26 @@ interface CallScreenProps {
   contactName: string;
   contactAvatar?: string;
   initialStatusText?: string;
-  onConnected: () => void;
+  onConnected?: () => void;
   onEnd: () => void;
 }
 
-export default function CallScreen({ channelName, callType, contactName, contactAvatar, initialStatusText, onConnected, onEnd }: CallScreenProps) {
+export default function CallScreen({
+  channelName,
+  callType,
+  contactName,
+  contactAvatar,
+  initialStatusText,
+  onConnected,
+  onEnd,
+}: CallScreenProps) {
   const [status, setStatus] = useState(initialStatusText || "Connecting…");
   const [remoteJoined, setRemoteJoined] = useState(false);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+  const [cameraSwitchError, setCameraSwitchError] = useState("");
 
   const localVideoRef = useRef<HTMLDivElement>(null);
   const remoteVideoRef = useRef<HTMLDivElement>(null);
@@ -26,11 +35,20 @@ export default function CallScreen({ channelName, callType, contactName, contact
   const localTracksRef = useRef<any[]>([]);
   const timerRef = useRef<any>(null);
   const agoraRTCRef = useRef<any>(null);
+  const hasConnectedRef = useRef(false);
 
   function formatDuration(total: number) {
-    const mins = Math.floor(total / 60); 
+    const mins = Math.floor(total / 60);
     const secs = total % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function markConnected() {
+    if (hasConnectedRef.current) return;
+    hasConnectedRef.current = true;
+    setRemoteJoined(true);
+    setStatus("Connected");
+    onConnected?.();
   }
 
   useEffect(() => {
@@ -47,8 +65,7 @@ export default function CallScreen({ channelName, callType, contactName, contact
       client.on("user-published", async (user: any, mediaType: any) => {
         await client.subscribe(user, mediaType);
         if (mediaType === "video") {
-          setRemoteJoined(true);
-          setStatus("Connected");
+          markConnected();
           setTimeout(() => {
             if (remoteVideoRef.current) {
               user.videoTrack.play(remoteVideoRef.current);
@@ -56,14 +73,33 @@ export default function CallScreen({ channelName, callType, contactName, contact
           }, 100);
         }
         if (mediaType === "audio") {
-          setRemoteJoined(true);
-          setStatus("Connected");
+          markConnected();
           user.audioTrack.play();
         }
       });
 
       client.on("user-unpublished", () => {
         setRemoteJoined(false);
+      });
+
+      client.on("connection-state-change", (curState: string, _prevState: string, reason: string) => {
+        if (curState === "RECONNECTING") {
+          setStatus("Reconnecting…");
+        } else if (curState === "CONNECTED") {
+          if (hasConnectedRef.current) setStatus("Connected");
+        } else if (curState === "DISCONNECTED" && reason !== "LEAVE") {
+          setStatus("Connection lost — trying to reconnect…");
+        }
+      });
+
+      client.on("token-privilege-will-expire", async () => {
+        try {
+          const res = await fetch(`/api/agora-token?channel=${channelName}`);
+          const { token } = await res.json();
+          await client.renewToken(token);
+        } catch (err) {
+          console.log("Token renewal failed", err);
+        }
       });
 
       try {
@@ -88,12 +124,8 @@ export default function CallScreen({ channelName, callType, contactName, contact
 
         localTracksRef.current = tracks;
         await client.publish(tracks);
-
-        if (!cancelled) {
-          setStatus(callType === "video" ? "Waiting for answer…" : "Calling…");
-        }
       } catch (err: any) {
-        setStatus("Could not connect: " + err.message);
+        if (!cancelled) setStatus("Could not connect: " + err.message);
       }
     }
 
@@ -144,8 +176,11 @@ export default function CallScreen({ channelName, callType, contactName, contact
     if (!videoTrack) return;
 
     const newFacing = facingMode === "user" ? "environment" : "user";
+    let switched = false;
+
     try {
       await videoTrack.setDevice(undefined, { facingMode: newFacing } as any);
+      switched = true;
     } catch {
       try {
         const devices = await agoraRTCRef.current.getCameras();
@@ -153,12 +188,19 @@ export default function CallScreen({ channelName, callType, contactName, contact
           const currentId = videoTrack.getTrackLabel?.();
           const nextDevice = devices.find((d: any) => d.label !== currentId) || devices[1] || devices[0];
           await videoTrack.setDevice(nextDevice.deviceId);
+          switched = true;
         }
       } catch (err) {
         console.log("Camera switch not supported on this device");
       }
     }
-    setFacingMode(newFacing);
+
+    if (switched) {
+      setFacingMode(newFacing);
+    } else {
+      setCameraSwitchError("This device doesn't support switching cameras during a call.");
+      setTimeout(() => setCameraSwitchError(""), 3000);
+    }
   }
 
   return (
@@ -166,7 +208,7 @@ export default function CallScreen({ channelName, callType, contactName, contact
       {callType === "video" && (
         <div className="absolute inset-0">
           <div ref={remoteVideoRef} className="w-full h-full bg-zinc-900" />
-                   <div
+          <div
             ref={localVideoRef}
             className="absolute bottom-28 right-4 w-28 h-40 rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700"
             style={{ transform: facingMode === "user" ? "scaleX(-1)" : "scaleX(1)" }}
@@ -179,6 +221,9 @@ export default function CallScreen({ channelName, callType, contactName, contact
         <p className="text-zinc-400 text-xs flex items-center justify-center gap-1">
           🔒 {remoteJoined ? formatDuration(seconds) : status}
         </p>
+        {cameraSwitchError && (
+          <p className="text-yellow-400 text-xs mt-1">{cameraSwitchError}</p>
+        )}
       </div>
 
       {(!remoteJoined || callType === "audio") && (
