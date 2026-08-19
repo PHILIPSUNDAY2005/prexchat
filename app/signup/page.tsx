@@ -120,7 +120,7 @@ export default function Signup() {
           type="text"
           value={fullName}
           onChange={(e) => setFullName(e.target.value)}
-          className="w-full p-2 rounded-lg text-sm outline-none"
+         className="w-full p-2 rounded-lg text-sm outline-none bg-white text-black placeholder-zinc-500"
         />
 
         <label className="block text-left text-xs text-zinc-300 mt-3 mb-1">Username</label>
