@@ -166,9 +166,10 @@ export default function CallScreen({ channelName, callType, contactName, contact
       {callType === "video" && (
         <div className="absolute inset-0">
           <div ref={remoteVideoRef} className="w-full h-full bg-zinc-900" />
-          <div
+                   <div
             ref={localVideoRef}
             className="absolute bottom-28 right-4 w-28 h-40 rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700"
+            style={{ transform: facingMode === "user" ? "scaleX(-1)" : "scaleX(1)" }}
           />
         </div>
       )}
