@@ -170,35 +170,32 @@ export default function CallScreen({
       setCameraOff(!cameraOff);
     }
   }
-
   async function switchCamera() {
-    const videoTrack = localTracksRef.current.find((t) => t.trackMediaType === "video");
-    if (!videoTrack) return;
+    const oldVideoTrack = localTracksRef.current.find((t) => t.trackMediaType === "video");
+    if (!oldVideoTrack || !agoraRTCRef.current || !clientRef.current) return;
 
     const newFacing = facingMode === "user" ? "environment" : "user";
-    let switched = false;
 
     try {
-      await videoTrack.setDevice(undefined, { facingMode: newFacing } as any);
-      switched = true;
-    } catch {
-      try {
-        const devices = await agoraRTCRef.current.getCameras();
-        if (devices.length > 1) {
-          const currentId = videoTrack.getTrackLabel?.();
-          const nextDevice = devices.find((d: any) => d.label !== currentId) || devices[1] || devices[0];
-          await videoTrack.setDevice(nextDevice.deviceId);
-          switched = true;
-        }
-      } catch (err) {
-        console.log("Camera switch not supported on this device");
-      }
-    }
+      const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
 
-    if (switched) {
+      await clientRef.current.unpublish(oldVideoTrack);
+      oldVideoTrack.stop();
+      oldVideoTrack.close();
+
+      localTracksRef.current = localTracksRef.current.filter((t) => t.trackMediaType !== "video");
+      localTracksRef.current.push(newVideoTrack);
+
+      if (localVideoRef.current) {
+        newVideoTrack.play(localVideoRef.current);
+      }
+
+      await clientRef.current.publish(newVideoTrack);
+
       setFacingMode(newFacing);
-    } else {
-      setCameraSwitchError("This device doesn't support switching cameras during a call.");
+    } catch (err) {
+      console.log("Camera switch failed", err);
+      setCameraSwitchError("Could not switch camera on this device.");
       setTimeout(() => setCameraSwitchError(""), 3000);
     }
   }
