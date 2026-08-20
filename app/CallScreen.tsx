@@ -113,12 +113,12 @@ export default function CallScreen({
         tracks.push(micTrack);
 
         if (callType === "video") {
-          const camTrack = await AgoraRTC.createCameraVideoTrack({
+                    const camTrack = await AgoraRTC.createCameraVideoTrack({
             facingMode: "user",
           });
           tracks.push(camTrack);
           if (localVideoRef.current && !cancelled) {
-            camTrack.play(localVideoRef.current);
+            camTrack.play(localVideoRef.current, { mirror: true });
           }
         }
 
@@ -186,11 +186,11 @@ export default function CallScreen({
       // requesting it again — required on many Android devices.
       await new Promise((resolve) => setTimeout(resolve, 300));
 
-      const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
+           const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
       localTracksRef.current.push(newVideoTrack);
 
       if (localVideoRef.current) {
-        newVideoTrack.play(localVideoRef.current);
+        newVideoTrack.play(localVideoRef.current, { mirror: newFacing === "user" });
       }
 
       await clientRef.current.publish(newVideoTrack);
@@ -207,10 +207,9 @@ export default function CallScreen({
       {callType === "video" && (
         <div className="absolute inset-0">
           <div ref={remoteVideoRef} className="w-full h-full bg-zinc-900" />
-          <div
+                    <div
             ref={localVideoRef}
             className="absolute bottom-28 right-4 w-28 h-40 rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700"
-            style={{ transform: facingMode === "user" ? "scaleX(-1)" : "scaleX(1)" }}
           />
         </div>
       )}
