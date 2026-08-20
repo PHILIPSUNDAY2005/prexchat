@@ -177,13 +177,16 @@ export default function CallScreen({
     const newFacing = facingMode === "user" ? "environment" : "user";
 
     try {
-      const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
-
       await clientRef.current.unpublish(oldVideoTrack);
       oldVideoTrack.stop();
       oldVideoTrack.close();
-
       localTracksRef.current = localTracksRef.current.filter((t) => t.trackMediaType !== "video");
+
+      // Give the camera hardware a moment to fully release before
+      // requesting it again — required on many Android devices.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
       localTracksRef.current.push(newVideoTrack);
 
       if (localVideoRef.current) {
@@ -191,7 +194,6 @@ export default function CallScreen({
       }
 
       await clientRef.current.publish(newVideoTrack);
-
       setFacingMode(newFacing);
     } catch (err) {
       console.log("Camera switch failed", err);
