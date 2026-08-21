@@ -22,12 +22,14 @@ export default function CallScreen({
   onEnd,
 }: CallScreenProps) {
   const [status, setStatus] = useState(initialStatusText || "Connecting…");
-  const [remoteJoined, setRemoteJoined] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [remoteVideoActive, setRemoteVideoActive] = useState(false);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const [cameraSwitchError, setCameraSwitchError] = useState("");
+  const [isLocalMain, setIsLocalMain] = useState(false);
 
   const localVideoRef = useRef<HTMLDivElement>(null);
   const remoteVideoRef = useRef<HTMLDivElement>(null);
@@ -44,11 +46,11 @@ export default function CallScreen({
   }
 
   function markConnected() {
-    if (hasConnectedRef.current) return;
-    hasConnectedRef.current = true;
-    setRemoteJoined(true);
-    setStatus("Connected");
-    onConnected?.();
+    if (!hasConnectedRef.current) {
+      hasConnectedRef.current = true;
+      setIsConnected(true);
+      onConnected?.();
+    }
   }
 
   useEffect(() => {
@@ -66,6 +68,7 @@ export default function CallScreen({
         await client.subscribe(user, mediaType);
         if (mediaType === "video") {
           markConnected();
+          setRemoteVideoActive(true);
           setTimeout(() => {
             if (remoteVideoRef.current) {
               user.videoTrack.play(remoteVideoRef.current);
@@ -78,15 +81,13 @@ export default function CallScreen({
         }
       });
 
-      client.on("user-unpublished", () => {
-        setRemoteJoined(false);
+      client.on("user-unpublished", (_user: any, mediaType: any) => {
+        if (mediaType === "video") setRemoteVideoActive(false);
       });
 
       client.on("connection-state-change", (curState: string, _prevState: string, reason: string) => {
         if (curState === "RECONNECTING") {
           setStatus("Reconnecting…");
-        } else if (curState === "CONNECTED") {
-          if (hasConnectedRef.current) setStatus("Connected");
         } else if (curState === "DISCONNECTED" && reason !== "LEAVE") {
           setStatus("Connection lost — trying to reconnect…");
         }
@@ -113,9 +114,7 @@ export default function CallScreen({
         tracks.push(micTrack);
 
         if (callType === "video") {
-                    const camTrack = await AgoraRTC.createCameraVideoTrack({
-            facingMode: "user",
-          });
+          const camTrack = await AgoraRTC.createCameraVideoTrack({ facingMode: "user" });
           tracks.push(camTrack);
           if (localVideoRef.current && !cancelled) {
             camTrack.play(localVideoRef.current, { mirror: true });
@@ -145,7 +144,7 @@ export default function CallScreen({
   }, [channelName, callType]);
 
   useEffect(() => {
-    if (remoteJoined) {
+    if (isConnected) {
       timerRef.current = setInterval(() => {
         setSeconds((s) => s + 1);
       }, 1000);
@@ -153,7 +152,7 @@ export default function CallScreen({
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [remoteJoined]);
+  }, [isConnected]);
 
   function toggleMute() {
     const audioTrack = localTracksRef.current.find((t) => t.trackMediaType === "audio");
@@ -170,6 +169,7 @@ export default function CallScreen({
       setCameraOff(!cameraOff);
     }
   }
+
   async function switchCamera() {
     const oldVideoTrack = localTracksRef.current.find((t) => t.trackMediaType === "video");
     if (!oldVideoTrack || !agoraRTCRef.current || !clientRef.current) return;
@@ -182,11 +182,9 @@ export default function CallScreen({
       oldVideoTrack.close();
       localTracksRef.current = localTracksRef.current.filter((t) => t.trackMediaType !== "video");
 
-      // Give the camera hardware a moment to fully release before
-      // requesting it again — required on many Android devices.
       await new Promise((resolve) => setTimeout(resolve, 300));
 
-           const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
+      const newVideoTrack = await agoraRTCRef.current.createCameraVideoTrack({ facingMode: newFacing });
       localTracksRef.current.push(newVideoTrack);
 
       if (localVideoRef.current) {
@@ -202,29 +200,58 @@ export default function CallScreen({
     }
   }
 
+  const showBigWaitingAvatar = !isConnected;
+  const pipClass =
+    "absolute bottom-28 right-4 w-28 h-40 rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700 z-20 cursor-pointer";
+  const mainClass = "w-full h-full bg-zinc-900";
+
   return (
     <div className="fixed inset-0 z-50 bg-[#0B1120] flex flex-col items-center justify-center text-white overflow-hidden">
-      {callType === "video" && (
+      {callType === "video" && isConnected && (
         <div className="absolute inset-0">
-          <div ref={remoteVideoRef} className="w-full h-full bg-zinc-900" />
-                    <div
+          <div
+            ref={remoteVideoRef}
+            onClick={() => { if (isLocalMain) setIsLocalMain(false); }}
+            className={isLocalMain ? pipClass : mainClass}
+          />
+          <div
             ref={localVideoRef}
-            className="absolute bottom-28 right-4 w-28 h-40 rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700"
+            onClick={() => { if (!isLocalMain) setIsLocalMain(true); }}
+            className={!isLocalMain ? pipClass : mainClass}
           />
         </div>
       )}
 
-      <div className="absolute top-10 left-0 right-0 text-center z-10">
-        <p className="font-semibold text-lg">{contactName}</p>
-        <p className="text-zinc-400 text-xs flex items-center justify-center gap-1">
-          🔒 {remoteJoined ? formatDuration(seconds) : status}
-        </p>
+      {callType === "video" && !isConnected && (
+        <div className="absolute inset-0">
+          <div ref={localVideoRef} className="w-full h-full bg-zinc-900" />
+        </div>
+      )}
+
+      {/* Top info pill — small avatar badge at the edge, not floating in the middle */}
+      <div className="absolute top-6 left-0 right-0 flex flex-col items-center z-10 px-4">
+        <div className="flex items-center gap-2 bg-black/40 rounded-full pl-1 pr-4 py-1">
+          <div className="w-8 h-8 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold text-sm flex-shrink-0">
+            {contactAvatar ? (
+              <img src={contactAvatar} className="w-full h-full object-cover" />
+            ) : (
+              contactName?.charAt(0)
+            )}
+          </div>
+          <div className="text-left">
+            <p className="font-semibold text-sm leading-tight">{contactName}</p>
+            <p className="text-zinc-300 text-[11px] leading-tight flex items-center gap-1">
+              🔒 {isConnected ? formatDuration(seconds) : status}
+            </p>
+          </div>
+        </div>
         {cameraSwitchError && (
-          <p className="text-yellow-400 text-xs mt-1">{cameraSwitchError}</p>
+          <p className="text-yellow-400 text-xs mt-2 bg-black/40 px-3 py-1 rounded-full">{cameraSwitchError}</p>
         )}
       </div>
 
-      {(!remoteJoined || callType === "audio") && (
+      {/* Big centered avatar — only while waiting to connect, or for audio calls throughout */}
+      {(showBigWaitingAvatar || callType === "audio") && (
         <div className="relative z-10 flex flex-col items-center">
           <div className="w-28 h-28 rounded-full bg-blue-500 overflow-hidden flex items-center justify-center font-bold text-3xl mb-3">
             {contactAvatar ? (
@@ -233,11 +260,6 @@ export default function CallScreen({
               contactName?.charAt(0)
             )}
           </div>
-          {callType === "audio" && (
-            <p className="text-zinc-400 text-sm">
-              {remoteJoined ? formatDuration(seconds) : status}
-            </p>
-          )}
         </div>
       )}
 
